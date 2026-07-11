@@ -25,7 +25,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 KST = timezone(timedelta(hours=9))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", 1234)
 
 PREFERRED_DB_PATH = os.environ.get(
     "CHAT_DB_PATH",
