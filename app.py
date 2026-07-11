@@ -1036,22 +1036,9 @@ CHAT_HTML = """
 <script>
 const roomCode = {{ room_code | tojson }};
 const initialToken = {{ user_token | tojson }};
-const tokenStorageKey = `contact_guard_token_${roomCode}`;
-
-if (initialToken) {
-  sessionStorage.setItem(
-    tokenStorageKey,
-    initialToken
-  );
-}
-
-const userToken =
-  initialToken
-  || sessionStorage.getItem(tokenStorageKey)
-  || "";
+const userToken = initialToken;
 
 let lastMessageId = 0;
-let authenticationFailed = false;
 
 const messagesElement =
   document.getElementById("messages");
@@ -1094,14 +1081,12 @@ function showNotice(
   );
 }
 
-function handleUnauthorized(
+function redirectToHomeOnUnauthorized(
   response
 ) {
   if (response.status === 401) {
-    authenticationFailed = true;
-
     showNotice(
-      "채팅방 인증이 끊겼어. 현재 탭을 닫고 메인 화면에서 방에 다시 입장해줘."
+      "채팅방 인증이 끊겼어. 메인 화면에서 방에 다시 입장해줘."
     );
 
     return true;
@@ -1157,10 +1142,6 @@ function addMessage(message) {
 }
 
 async function loadMessages() {
-  if (authenticationFailed) {
-    return;
-  }
-
   try {
     const response = await fetch(
       `/api/room/${roomCode}/messages?after=${lastMessageId}&token=${encodeURIComponent(userToken)}`,
@@ -1171,7 +1152,7 @@ async function loadMessages() {
     );
 
     if (
-      handleUnauthorized(response)
+      redirectToHomeOnUnauthorized(response)
     ) {
       return;
     }
@@ -1411,14 +1392,6 @@ document.getElementById(
     const content =
       inputElement.value.trim();
 
-    if (authenticationFailed) {
-      showNotice(
-        "채팅방 인증이 끊겼어. 메인 화면에서 방에 다시 입장해줘."
-      );
-
-      return;
-    }
-
     if (!file && !content) {
       showNotice(
         "메시지나 사진을 선택해."
@@ -1445,7 +1418,7 @@ document.getElementById(
         : await sendText(content);
 
       if (
-        handleUnauthorized(response)
+        redirectToHomeOnUnauthorized(response)
       ) {
         return;
       }
