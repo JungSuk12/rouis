@@ -47,6 +47,8 @@ LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_SIDE = 1280
+JPEG_QUALITY = 82
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
@@ -481,31 +483,34 @@ def save_clean_image(
         )
 
     try:
-        image = Image.open(
+        with Image.open(
             io.BytesIO(raw_bytes)
-        )
+        ) as source_image:
+            original_format = source_image.format
 
-        image.load()
+            if original_format not in ALLOWED_IMAGE_FORMATS:
+                raise ValueError(
+                    "JPG, PNG, WEBP 이미지만 가능해."
+                )
+
+            # 비율은 유지하고 최대 변만 줄인다.
+            # 원본 해상도 이미지는 서버에 저장하지 않는다.
+            source_image.thumbnail(
+                (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
+                Image.Resampling.LANCZOS,
+                reducing_gap=3.0,
+            )
+
+            # EXIF·알파 채널 등 불필요한 정보를 제거한다.
+            image = source_image.convert("RGB")
+
+    except ValueError:
+        raise
 
     except Exception as error:
         raise ValueError(
             "이미지 파일을 읽을 수 없어."
         ) from error
-
-    if image.format not in ALLOWED_IMAGE_FORMATS:
-        raise ValueError(
-            "JPG, PNG, WEBP 이미지만 가능해."
-        )
-
-    # EXIF 등 메타데이터 제거
-    image = image.convert("RGB")
-
-    max_side = 1800
-
-    if max(image.size) > max_side:
-        image.thumbnail(
-            (max_side, max_side)
-        )
 
     filename = (
         f"{uuid.uuid4().hex}.jpg"
@@ -516,12 +521,17 @@ def save_clean_image(
         / filename
     )
 
-    image.save(
-        save_path,
-        format="JPEG",
-        quality=88,
-        optimize=True,
-    )
+    try:
+        image.save(
+            save_path,
+            format="JPEG",
+            quality=JPEG_QUALITY,
+            optimize=True,
+            progressive=True,
+        )
+
+    finally:
+        image.close()
 
     return (
         filename,
