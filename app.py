@@ -19,7 +19,7 @@ from flask import (
     session,
     url_for,
 )
-from PIL import Image
+from PIL import Image, ImageOps
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -48,8 +48,12 @@ LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_SIDE = 1280
+MAX_IMAGE_PIXELS = 40_000_000
 JPEG_QUALITY = 82
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+
+# 압축 폭탄 이미지로 인한 과도한 메모리 사용 방지
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 # =========================================================
@@ -62,13 +66,6 @@ def resolve_writable_path(
     *,
     is_directory: bool = False,
 ) -> str:
-    """Render에서는 영구 디스크 경로를 반드시 사용한다.
-
-    예전 코드는 /var/data 쓰기에 실패하면 조용히 프로젝트 폴더의
-    임시 DB로 전환했다. 그 상태에서 재배포·재시작되면 rooms/members가
-    사라져 기존 토큰이 전부 401이 되므로, Render에서는 시작 자체를
-    실패시켜 저장소 문제를 바로 드러낸다.
-    """
     preferred_path = Path(preferred)
 
     try:
@@ -89,24 +86,20 @@ def resolve_writable_path(
 
         return str(preferred_path)
 
-    except OSError as error:
-        is_render = bool(os.environ.get("RENDER"))
-        expects_persistent_disk = str(preferred_path).startswith("/var/data")
-
-        if is_render or expects_persistent_disk:
-            raise RuntimeError(
-                "Render 영구 디스크 경로를 사용할 수 없어. "
-                f"경로={preferred_path}. "
-                "Render Disk가 /var/data에 마운트됐는지 확인해줘."
-            ) from error
-
+    except OSError:
         local_path = Path(local)
+
         target_directory = (
             local_path
             if is_directory
             else local_path.parent
         )
-        target_directory.mkdir(parents=True, exist_ok=True)
+
+        target_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         return str(local_path)
 
 
@@ -125,14 +118,6 @@ OCR_MODEL_DIR = resolve_writable_path(
     PREFERRED_OCR_MODEL_DIR,
     LOCAL_OCR_MODEL_DIR,
     is_directory=True,
-)
-
-print(
-    "[STORAGE] "
-    f"db={DB_PATH} "
-    f"uploads={UPLOAD_DIR} "
-    f"ocr_models={OCR_MODEL_DIR}",
-    flush=True,
 )
 
 
@@ -454,29 +439,13 @@ def get_ocr_reader():
     global _ocr_reader
 
     if _ocr_reader is None:
-        print(
-            "[OCR] importing easyocr",
-            flush=True,
-        )
-
         import easyocr
-
-        print(
-            "[OCR] creating EasyOCR reader",
-            flush=True,
-        )
 
         _ocr_reader = easyocr.Reader(
             ["ko", "en"],
             gpu=False,
             model_storage_directory=OCR_MODEL_DIR,
             download_enabled=True,
-            verbose=True,
-        )
-
-        print(
-            "[OCR] EasyOCR reader ready",
-            flush=True,
         )
 
     return _ocr_reader
@@ -485,27 +454,18 @@ def get_ocr_reader():
 def extract_text_from_image(
     image_path: str,
 ) -> str:
-    print(
-        "[OCR] get reader",
-        flush=True,
-    )
-
     reader = get_ocr_reader()
-
-    print(
-        "[OCR] readtext started",
-        flush=True,
-    )
 
     results = reader.readtext(
         image_path,
         detail=0,
         paragraph=False,
-    )
-
-    print(
-        "[OCR] readtext finished",
-        flush=True,
+        decoder="greedy",
+        beamWidth=1,
+        batch_size=1,
+        workers=0,
+        canvas_size=1280,
+        mag_ratio=1.0,
     )
 
     return "\n".join(
@@ -536,23 +496,59 @@ def save_clean_image(
         with Image.open(
             io.BytesIO(raw_bytes)
         ) as source_image:
-            original_format = source_image.format
+            source_format = (
+                source_image.format
+                or ""
+            ).upper()
 
-            if original_format not in ALLOWED_IMAGE_FORMATS:
+            if source_format not in ALLOWED_IMAGE_FORMATS:
                 raise ValueError(
                     "JPG, PNG, WEBP 이미지만 가능해."
                 )
 
-            # 비율은 유지하고 최대 변만 줄인다.
-            # 원본 해상도 이미지는 서버에 저장하지 않는다.
-            source_image.thumbnail(
-                (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
-                Image.Resampling.LANCZOS,
-                reducing_gap=3.0,
+            width, height = source_image.size
+
+            if width <= 0 or height <= 0:
+                raise ValueError(
+                    "이미지 크기가 올바르지 않아."
+                )
+
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    "이미지 해상도가 너무 커."
+                )
+
+            # JPEG는 가능한 경우 전체 해상도로 디코딩하기 전에
+            # 축소 디코딩을 요청해 순간 메모리 사용량을 줄인다.
+            if source_format == "JPEG":
+                source_image.draft(
+                    "RGB",
+                    (
+                        MAX_IMAGE_SIDE,
+                        MAX_IMAGE_SIDE,
+                    ),
+                )
+
+            source_image.load()
+
+            transposed_image = (
+                ImageOps.exif_transpose(
+                    source_image
+                )
             )
 
-            # EXIF·알파 채널 등 불필요한 정보를 제거한다.
-            image = source_image.convert("RGB")
+            try:
+                clean_image = (
+                    transposed_image.convert(
+                        "RGB"
+                    )
+                )
+            finally:
+                if (
+                    transposed_image
+                    is not source_image
+                ):
+                    transposed_image.close()
 
     except ValueError:
         raise
@@ -562,26 +558,35 @@ def save_clean_image(
             "이미지 파일을 읽을 수 없어."
         ) from error
 
-    filename = (
-        f"{uuid.uuid4().hex}.jpg"
-    )
-
-    save_path = (
-        Path(UPLOAD_DIR)
-        / filename
-    )
-
     try:
-        image.save(
+        if max(clean_image.size) > MAX_IMAGE_SIDE:
+            clean_image.thumbnail(
+                (
+                    MAX_IMAGE_SIDE,
+                    MAX_IMAGE_SIDE,
+                ),
+                Image.Resampling.LANCZOS,
+                reducing_gap=2.0,
+            )
+
+        filename = (
+            f"{uuid.uuid4().hex}.jpg"
+        )
+
+        save_path = (
+            Path(UPLOAD_DIR)
+            / filename
+        )
+
+        # optimize/progressive는 저장 중 추가 메모리를 사용할 수 있어 제외
+        clean_image.save(
             save_path,
             format="JPEG",
             quality=JPEG_QUALITY,
-            optimize=True,
-            progressive=True,
         )
 
     finally:
-        image.close()
+        clean_image.close()
 
     return (
         filename,
@@ -700,33 +705,12 @@ def require_room_member_api(view):
         )
 
         if member is None:
-            with db_connect() as connection:
-                room_exists = connection.execute(
-                    "SELECT 1 FROM rooms WHERE room_code = ?",
-                    (normalized_room_code,),
-                ).fetchone() is not None
-
-                member_count = connection.execute(
-                    "SELECT COUNT(*) AS count FROM members WHERE room_code = ?",
-                    (normalized_room_code,),
-                ).fetchone()["count"]
-
-            print(
-                "[AUTH 401] "
-                f"room={normalized_room_code} "
-                f"token_prefix={user_token[:8] if user_token else '(empty)'} "
-                f"room_exists={room_exists} "
-                f"member_count={member_count} "
-                f"db={DB_PATH}",
-                flush=True,
-            )
-
             return jsonify(
                 {
                     "ok": False,
                     "message": (
-                        "채팅방 인증 정보가 서버 DB에 없어. "
-                        "새 방을 만든 뒤 다시 입장해줘."
+                        "채팅방 인증이 만료됐어. "
+                        "메인 화면에서 다시 입장해줘."
                     ),
                 }
             ), 401
@@ -1094,27 +1078,25 @@ CHAT_HTML = """
         placeholder="메시지를 입력해. 연락처·링크·SNS ID는 차단돼."
       ></textarea>
 
-      <button
-        id="send-button"
-        class="primary"
-        type="submit"
-      >
+      <button class="primary">
         전송
       </button>
     </form>
   </main>
 
 <script>
-const roomCode = {{ room_code | tojson }};
-const initialToken = {{ user_token | tojson }};
+const roomCode = "{{ room_code }}";
+const initialToken = "{{ user_token }}";
 const tokenStorageKey = `contact_guard_token_${roomCode}`;
 
-sessionStorage.setItem(
+localStorage.setItem(
   tokenStorageKey,
   initialToken
 );
 
-const userToken = initialToken;
+const userToken =
+  localStorage.getItem(tokenStorageKey)
+  || initialToken;
 
 let lastMessageId = 0;
 
@@ -1163,9 +1145,11 @@ function redirectToHomeOnUnauthorized(
   response
 ) {
   if (response.status === 401) {
-    showNotice(
-      "채팅방 인증 정보가 서버에서 사라졌어. 새 방을 만들어 다시 입장해줘."
+    localStorage.removeItem(
+      tokenStorageKey
     );
+
+    window.location.href = "/";
 
     return true;
   }
@@ -1222,7 +1206,7 @@ function addMessage(message) {
 async function loadMessages() {
   try {
     const response = await fetch(
-      `/api/room/${roomCode}/messages?after=${lastMessageId}&token=${encodeURIComponent(userToken)}`,
+      `/api/room/${roomCode}/messages?after=${lastMessageId}`,
       {
         cache: "no-store",
         headers: authenticatedHeaders()
@@ -1261,7 +1245,7 @@ async function loadMessages() {
 
 async function sendText(content) {
   return fetch(
-    `/api/room/${roomCode}/messages?token=${encodeURIComponent(userToken)}`,
+    `/api/room/${roomCode}/messages`,
     {
       method: "POST",
       headers: authenticatedHeaders(
@@ -1279,166 +1263,19 @@ async function sendText(content) {
   );
 }
 
-function resizeImageFile(
-  file,
-  maxSide = 1280,
-  quality = 0.82
-) {
-  return new Promise(
-    (resolve, reject) => {
-      const imageUrl =
-        URL.createObjectURL(file);
-
-      const image =
-        new Image();
-
-      image.onload = () => {
-        try {
-          let width =
-            image.naturalWidth;
-
-          let height =
-            image.naturalHeight;
-
-          if (
-            width > maxSide
-            || height > maxSide
-          ) {
-            const scale =
-              Math.min(
-                maxSide / width,
-                maxSide / height
-              );
-
-            width =
-              Math.max(
-                1,
-                Math.round(
-                  width * scale
-                )
-              );
-
-            height =
-              Math.max(
-                1,
-                Math.round(
-                  height * scale
-                )
-              );
-          }
-
-          const canvas =
-            document.createElement(
-              "canvas"
-            );
-
-          canvas.width = width;
-          canvas.height = height;
-
-          const context =
-            canvas.getContext("2d");
-
-          if (!context) {
-            throw new Error(
-              "이미지 변환을 시작할 수 없어."
-            );
-          }
-
-          context.fillStyle =
-            "#ffffff";
-
-          context.fillRect(
-            0,
-            0,
-            width,
-            height
-          );
-
-          context.drawImage(
-            image,
-            0,
-            0,
-            width,
-            height
-          );
-
-          canvas.toBlob(
-            blob => {
-              URL.revokeObjectURL(
-                imageUrl
-              );
-
-              if (!blob) {
-                reject(
-                  new Error(
-                    "이미지 압축에 실패했어."
-                  )
-                );
-
-                return;
-              }
-
-              resolve(blob);
-            },
-            "image/jpeg",
-            quality
-          );
-
-        } catch (error) {
-          URL.revokeObjectURL(
-            imageUrl
-          );
-
-          reject(error);
-        }
-      };
-
-      image.onerror = () => {
-        URL.revokeObjectURL(
-          imageUrl
-        );
-
-        reject(
-          new Error(
-            "선택한 이미지를 읽을 수 없어."
-          )
-        );
-      };
-
-      image.src = imageUrl;
-    }
-  );
-}
-
-
 async function sendImage(file) {
-  const resizedBlob =
-    await resizeImageFile(
-      file,
-      1280,
-      0.82
-    );
-
-  const formData =
-    new FormData();
+  const formData = new FormData();
 
   formData.append(
     "image",
-    resizedBlob,
-    "upload.jpg"
-  );
-
-  formData.append(
-    "token",
-    userToken
+    file
   );
 
   return fetch(
-    `/api/room/${roomCode}/image?token=${encodeURIComponent(userToken)}`,
+    `/api/room/${roomCode}/image`,
     {
       method: "POST",
-      headers:
-        authenticatedHeaders(),
+      headers: authenticatedHeaders(),
       body: formData
     }
   );
@@ -1479,9 +1316,7 @@ document.getElementById(
     }
 
     const button =
-      document.getElementById(
-        "send-button"
-      );
+      event.submitter;
 
     button.disabled = true;
 
@@ -2124,11 +1959,6 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
-    print(
-        f"[IMAGE] upload route entered room={room_code}",
-        flush=True,
-    )
-
     uploaded_file = request.files.get(
         "image"
     )
@@ -2158,23 +1988,17 @@ def send_image(room_code: str):
             }
         ), 400
 
+    finally:
+        # 원본 업로드 바이트를 OCR 시작 전에 해제
+        del raw_bytes
+
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
 
     try:
-        print(
-            f"[OCR] inspection started room={room_code}",
-            flush=True,
-        )
-
         ocr_text = extract_text_from_image(
             image_path
-        )
-
-        print(
-            f"[OCR] inspection finished room={room_code}",
-            flush=True,
         )
 
     except Exception as error:
