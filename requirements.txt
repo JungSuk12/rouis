@@ -1,4 +1,4 @@
 Flask==3.1.2
 gunicorn==23.0.0
-EasyOCR==1.7.2
 Pillow==11.3.0
+easyocr==1.7.2
