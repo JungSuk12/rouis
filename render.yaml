@@ -6,6 +6,12 @@ services:
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 1 --threads 4 --timeout 180
     healthCheckPath: /health
     autoDeploy: true
+
+    disk:
+      name: contact-guard-data
+      mountPath: /var/data
+      sizeGB: 1
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
