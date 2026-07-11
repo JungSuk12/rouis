@@ -25,7 +25,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 KST = timezone(timedelta(hours=9))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me").strip()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
 
 PREFERRED_DB_PATH = os.environ.get(
     "CHAT_DB_PATH",
@@ -62,6 +62,13 @@ def resolve_writable_path(
     *,
     is_directory: bool = False,
 ) -> str:
+    """Render에서는 영구 디스크 경로를 반드시 사용한다.
+
+    예전 코드는 /var/data 쓰기에 실패하면 조용히 프로젝트 폴더의
+    임시 DB로 전환했다. 그 상태에서 재배포·재시작되면 rooms/members가
+    사라져 기존 토큰이 전부 401이 되므로, Render에서는 시작 자체를
+    실패시켜 저장소 문제를 바로 드러낸다.
+    """
     preferred_path = Path(preferred)
 
     try:
@@ -82,20 +89,24 @@ def resolve_writable_path(
 
         return str(preferred_path)
 
-    except OSError:
-        local_path = Path(local)
+    except OSError as error:
+        is_render = bool(os.environ.get("RENDER"))
+        expects_persistent_disk = str(preferred_path).startswith("/var/data")
 
+        if is_render or expects_persistent_disk:
+            raise RuntimeError(
+                "Render 영구 디스크 경로를 사용할 수 없어. "
+                f"경로={preferred_path}. "
+                "Render Disk가 /var/data에 마운트됐는지 확인해줘."
+            ) from error
+
+        local_path = Path(local)
         target_directory = (
             local_path
             if is_directory
             else local_path.parent
         )
-
-        target_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
+        target_directory.mkdir(parents=True, exist_ok=True)
         return str(local_path)
 
 
@@ -114,6 +125,14 @@ OCR_MODEL_DIR = resolve_writable_path(
     PREFERRED_OCR_MODEL_DIR,
     LOCAL_OCR_MODEL_DIR,
     is_directory=True,
+)
+
+print(
+    "[STORAGE] "
+    f"db={DB_PATH} "
+    f"uploads={UPLOAD_DIR} "
+    f"ocr_models={OCR_MODEL_DIR}",
+    flush=True,
 )
 
 
@@ -650,12 +669,33 @@ def require_room_member_api(view):
         )
 
         if member is None:
+            with db_connect() as connection:
+                room_exists = connection.execute(
+                    "SELECT 1 FROM rooms WHERE room_code = ?",
+                    (normalized_room_code,),
+                ).fetchone() is not None
+
+                member_count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM members WHERE room_code = ?",
+                    (normalized_room_code,),
+                ).fetchone()["count"]
+
+            print(
+                "[AUTH 401] "
+                f"room={normalized_room_code} "
+                f"token_prefix={user_token[:8] if user_token else '(empty)'} "
+                f"room_exists={room_exists} "
+                f"member_count={member_count} "
+                f"db={DB_PATH}",
+                flush=True,
+            )
+
             return jsonify(
                 {
                     "ok": False,
                     "message": (
-                        "채팅방 인증이 만료됐어. "
-                        "메인 화면에서 다시 입장해줘."
+                        "채팅방 인증 정보가 서버 DB에 없어. "
+                        "새 방을 만든 뒤 다시 입장해줘."
                     ),
                 }
             ), 401
@@ -1036,6 +1076,13 @@ CHAT_HTML = """
 <script>
 const roomCode = {{ room_code | tojson }};
 const initialToken = {{ user_token | tojson }};
+const tokenStorageKey = `contact_guard_token_${roomCode}`;
+
+sessionStorage.setItem(
+  tokenStorageKey,
+  initialToken
+);
+
 const userToken = initialToken;
 
 let lastMessageId = 0;
@@ -1086,7 +1133,7 @@ function redirectToHomeOnUnauthorized(
 ) {
   if (response.status === 401) {
     showNotice(
-      "채팅방 인증이 끊겼어. 메인 화면에서 방에 다시 입장해줘."
+      "채팅방 인증 정보가 서버에서 사라졌어. 새 방을 만들어 다시 입장해줘."
     );
 
     return true;
@@ -1334,27 +1381,20 @@ function resizeImageFile(
 
 
 async function sendImage(file) {
-  if (!file) {
-    throw new Error(
-      "이미지가 선택되지 않았어."
+  const resizedBlob =
+    await resizeImageFile(
+      file,
+      1280,
+      0.82
     );
-  }
-
-  if (file.size > 8 * 1024 * 1024) {
-    throw new Error(
-      "이미지는 최대 8MB까지 가능해."
-    );
-  }
 
   const formData =
     new FormData();
 
-  // 브라우저 캔버스 변환을 거치지 않고 원본을 바로 보낸다.
-  // 서버의 save_clean_image()가 1280px 축소·JPEG 변환을 담당한다.
   formData.append(
     "image",
-    file,
-    file.name || "upload.jpg"
+    resizedBlob,
+    "upload.jpg"
   );
 
   formData.append(
@@ -1368,8 +1408,7 @@ async function sendImage(file) {
       method: "POST",
       headers:
         authenticatedHeaders(),
-      body: formData,
-      cache: "no-store"
+      body: formData
     }
   );
 }
