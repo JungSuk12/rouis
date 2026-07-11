@@ -1,4 +1,4 @@
-Flask>=3.0,<4.0
-gunicorn>=22.0,<24.0
-Pillow>=10.3,<12.0
-rapidocr-onnxruntime==1.4.4
+Flask
+gunicorn
+Pillow
+easyocr
