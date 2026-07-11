@@ -1023,7 +1023,11 @@ CHAT_HTML = """
         placeholder="메시지를 입력해. 연락처·링크·SNS ID는 차단돼."
       ></textarea>
 
-      <button class="primary">
+      <button
+        id="send-button"
+        class="primary"
+        type="submit"
+      >
         전송
       </button>
     </form>
@@ -1208,19 +1212,161 @@ async function sendText(content) {
   );
 }
 
+function resizeImageFile(
+  file,
+  maxSide = 1280,
+  quality = 0.82
+) {
+  return new Promise(
+    (resolve, reject) => {
+      const imageUrl =
+        URL.createObjectURL(file);
+
+      const image =
+        new Image();
+
+      image.onload = () => {
+        try {
+          let width =
+            image.naturalWidth;
+
+          let height =
+            image.naturalHeight;
+
+          if (
+            width > maxSide
+            || height > maxSide
+          ) {
+            const scale =
+              Math.min(
+                maxSide / width,
+                maxSide / height
+              );
+
+            width =
+              Math.max(
+                1,
+                Math.round(
+                  width * scale
+                )
+              );
+
+            height =
+              Math.max(
+                1,
+                Math.round(
+                  height * scale
+                )
+              );
+          }
+
+          const canvas =
+            document.createElement(
+              "canvas"
+            );
+
+          canvas.width = width;
+          canvas.height = height;
+
+          const context =
+            canvas.getContext("2d");
+
+          if (!context) {
+            throw new Error(
+              "이미지 변환을 시작할 수 없어."
+            );
+          }
+
+          context.fillStyle =
+            "#ffffff";
+
+          context.fillRect(
+            0,
+            0,
+            width,
+            height
+          );
+
+          context.drawImage(
+            image,
+            0,
+            0,
+            width,
+            height
+          );
+
+          canvas.toBlob(
+            blob => {
+              URL.revokeObjectURL(
+                imageUrl
+              );
+
+              if (!blob) {
+                reject(
+                  new Error(
+                    "이미지 압축에 실패했어."
+                  )
+                );
+
+                return;
+              }
+
+              resolve(blob);
+            },
+            "image/jpeg",
+            quality
+          );
+
+        } catch (error) {
+          URL.revokeObjectURL(
+            imageUrl
+          );
+
+          reject(error);
+        }
+      };
+
+      image.onerror = () => {
+        URL.revokeObjectURL(
+          imageUrl
+        );
+
+        reject(
+          new Error(
+            "선택한 이미지를 읽을 수 없어."
+          )
+        );
+      };
+
+      image.src = imageUrl;
+    }
+  );
+}
+
+
 async function sendImage(file) {
-  const formData = new FormData();
+  const resizedBlob =
+    await resizeImageFile(
+      file,
+      1280,
+      0.82
+    );
+
+  const formData =
+    new FormData();
 
   formData.append(
     "image",
-    file
+    resizedBlob,
+    "upload.jpg"
   );
 
   return fetch(
     `/api/room/${roomCode}/image`,
     {
       method: "POST",
-      headers: authenticatedHeaders(),
+      headers:
+        authenticatedHeaders(),
       body: formData
     }
   );
@@ -1261,7 +1407,9 @@ document.getElementById(
     }
 
     const button =
-      event.submitter;
+      document.getElementById(
+        "send-button"
+      );
 
     button.disabled = true;
 
