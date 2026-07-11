@@ -1334,20 +1334,27 @@ function resizeImageFile(
 
 
 async function sendImage(file) {
-  const resizedBlob =
-    await resizeImageFile(
-      file,
-      1280,
-      0.82
+  if (!file) {
+    throw new Error(
+      "이미지가 선택되지 않았어."
     );
+  }
+
+  if (file.size > 8 * 1024 * 1024) {
+    throw new Error(
+      "이미지는 최대 8MB까지 가능해."
+    );
+  }
 
   const formData =
     new FormData();
 
+  // 브라우저 캔버스 변환을 거치지 않고 원본을 바로 보낸다.
+  // 서버의 save_clean_image()가 1280px 축소·JPEG 변환을 담당한다.
   formData.append(
     "image",
-    resizedBlob,
-    "upload.jpg"
+    file,
+    file.name || "upload.jpg"
   );
 
   formData.append(
@@ -1361,7 +1368,8 @@ async function sendImage(file) {
       method: "POST",
       headers:
         authenticatedHeaders(),
-      body: formData
+      body: formData,
+      cache: "no-store"
     }
   );
 }
@@ -2046,6 +2054,11 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
+    print(
+        f"[IMAGE] upload route entered room={room_code}",
+        flush=True,
+    )
+
     uploaded_file = request.files.get(
         "image"
     )
@@ -2080,8 +2093,18 @@ def send_image(room_code: str):
     created_at = now_kst_iso()
 
     try:
+        print(
+            f"[OCR] inspection started room={room_code}",
+            flush=True,
+        )
+
         ocr_text = extract_text_from_image(
             image_path
+        )
+
+        print(
+            f"[OCR] inspection finished room={room_code}",
+            flush=True,
         )
 
     except Exception as error:
