@@ -454,13 +454,29 @@ def get_ocr_reader():
     global _ocr_reader
 
     if _ocr_reader is None:
+        print(
+            "[OCR] importing easyocr",
+            flush=True,
+        )
+
         import easyocr
+
+        print(
+            "[OCR] creating EasyOCR reader",
+            flush=True,
+        )
 
         _ocr_reader = easyocr.Reader(
             ["ko", "en"],
             gpu=False,
             model_storage_directory=OCR_MODEL_DIR,
             download_enabled=True,
+            verbose=True,
+        )
+
+        print(
+            "[OCR] EasyOCR reader ready",
+            flush=True,
         )
 
     return _ocr_reader
@@ -469,12 +485,27 @@ def get_ocr_reader():
 def extract_text_from_image(
     image_path: str,
 ) -> str:
+    print(
+        "[OCR] get reader",
+        flush=True,
+    )
+
     reader = get_ocr_reader()
+
+    print(
+        "[OCR] readtext started",
+        flush=True,
+    )
 
     results = reader.readtext(
         image_path,
         detail=0,
         paragraph=False,
+    )
+
+    print(
+        "[OCR] readtext finished",
+        flush=True,
     )
 
     return "\n".join(
