@@ -1,0 +1,25 @@
+외부 접속용 Render 배포 순서
+
+1. 이 폴더의 파일 전체를 새 GitHub 저장소 최상단에 업로드한다.
+   app.py, requirements.txt, render.yaml이 같은 위치에 있어야 한다.
+
+2. Render 대시보드에서 New > Blueprint를 누른다.
+
+3. 방금 만든 GitHub 저장소를 선택한다.
+   Render가 render.yaml을 읽어 Web Service를 만든다.
+
+4. 배포가 Live가 되면 Render가 다음과 같은 공개 주소를 준다.
+   https://contact-guard-chat-xxxx.onrender.com
+
+5. 그 주소를 사용자 두 명에게 공유한다.
+   첫 사용자는 방 만들기, 두 번째 사용자는 같은 주소에서 방 코드로 입장한다.
+
+관리자 주소
+https://발급주소.onrender.com/admin
+
+중요
+- 무료 Render 서비스는 일정 시간 요청이 없으면 잠들 수 있다.
+- 무료 서비스의 파일 시스템은 영구 저장이 아니다. 재배포/재시작 시 SQLite DB, 업로드 이미지,
+  OCR 모델 파일이 사라질 수 있다.
+- 실제 운영에서는 유료 Web Service + /var/data Persistent Disk 또는 외부 DB/스토리지가 필요하다.
+- OCR 모델을 처음 내려받는 시점에는 응답이 오래 걸릴 수 있다.
