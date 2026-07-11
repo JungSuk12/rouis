@@ -410,6 +410,7 @@ def detect_contact_info(text: str) -> List[str]:
 
 _ocr_reader = None
 _ocr_reader_lock = threading.Lock()
+_ocr_process_lock = threading.Lock()
 
 
 def get_ocr_reader():
@@ -430,7 +431,10 @@ def get_ocr_reader():
                 download_enabled=True,
             )
             elapsed_ms = (time.perf_counter() - started) * 1000
-            print(f"[OCR] reader_ready={elapsed_ms:.1f}ms")
+            print(
+                f"[OCR] reader_ready={elapsed_ms:.1f}ms",
+                flush=True,
+            )
 
     return _ocr_reader
 
@@ -2115,11 +2119,17 @@ def send_image(room_code: str):
         reader_ms = (time.perf_counter() - reader_started) * 1000
 
         ocr_started = time.perf_counter()
-        results = reader.readtext(
-            image_path,
-            detail=0,
-            paragraph=False,
-        )
+
+        # EasyOCR/PyTorch 추론은 동시에 여러 번 실행될 때
+        # Render의 제한된 메모리를 크게 사용할 수 있으므로 직렬화한다.
+        with _ocr_process_lock:
+            results = reader.readtext(
+                image_path,
+                detail=0,
+                paragraph=False,
+                workers=0,
+            )
+
         ocr_ms = (time.perf_counter() - ocr_started) * 1000
 
         ocr_text = "\n".join(
@@ -2129,7 +2139,11 @@ def send_image(room_code: str):
         )
 
     except Exception as error:
-        print(f"[ERROR] OCR 처리 실패: {error}")
+        print(
+            "[ERROR] OCR 처리 실패: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
         Path(image_path).unlink(missing_ok=True)
 
         return jsonify({
@@ -2168,7 +2182,8 @@ def send_image(room_code: str):
             f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
             f"reader={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
             f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
-            f"total={total_ms:.1f}ms"
+            f"total={total_ms:.1f}ms",
+            flush=True,
         )
 
         return jsonify({
@@ -2210,7 +2225,8 @@ def send_image(room_code: str):
         f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
         f"reader={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
         f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
-        f"total={total_ms:.1f}ms"
+        f"total={total_ms:.1f}ms",
+        flush=True,
     )
 
     return jsonify({
