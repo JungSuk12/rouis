@@ -1,3 +1,8 @@
+# Render 권장 Start Command:
+# gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 180
+#
+# 이 파일은 GitHub에서 app.py 이름으로 사용해야 한다.
+
 import io
 import os
 import re
