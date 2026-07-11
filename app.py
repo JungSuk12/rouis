@@ -2327,14 +2327,9 @@ def health():
     return jsonify(
         {
             "status": "healthy",
-            "admin_password": ADMIN_PASSWORD,   # <-- 잠깐만 추가
-            "db_path": DB_PATH,
-            "service": (
-                "contact-guard-chat-ocr"
-            ),
-            "auth_mode": (
-                "room-token-header"
-            ),
+            "version": "admin-test-001",
+            "service": "contact-guard-chat-ocr",
+            "auth_mode": "room-token-header",
             "db_path": DB_PATH,
             "upload_dir": UPLOAD_DIR,
         }
