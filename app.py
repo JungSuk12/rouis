@@ -1,24 +1,9 @@
-# Render 권장 Start Command:
-# gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
-#
-# 이 파일은 GitHub에서 app.py 이름으로 사용해야 한다.
-
 import io
 import os
-# ONNX/OpenCV가 Render의 가상 CPU 수만큼 스레드를 만들지 않도록 제한한다.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-
 import re
 import sqlite3
 import secrets
-import threading
-import time
 import uuid
-import warnings
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
@@ -34,13 +19,13 @@ from flask import (
     session,
     url_for,
 )
-from PIL import Image, ImageOps
+from PIL import Image
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 KST = timezone(timedelta(hours=9))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "1234").strip()
 
 PREFERRED_DB_PATH = os.environ.get(
     "CHAT_DB_PATH",
@@ -52,16 +37,19 @@ PREFERRED_UPLOAD_DIR = os.environ.get(
     "/var/data/contact_guard_uploads",
 ).strip()
 
+PREFERRED_OCR_MODEL_DIR = os.environ.get(
+    "OCR_MODEL_DIR",
+    "/var/data/easyocr_models",
+).strip()
+
 LOCAL_DB_PATH = "contact_guard_chat.db"
 LOCAL_UPLOAD_DIR = "contact_guard_uploads"
+LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_SIDE = 1280
 JPEG_QUALITY = 82
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
-MAX_IMAGE_PIXELS = 20_000_000
-
-warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 
 # =========================================================
@@ -122,6 +110,11 @@ UPLOAD_DIR = resolve_writable_path(
     is_directory=True,
 )
 
+OCR_MODEL_DIR = resolve_writable_path(
+    PREFERRED_OCR_MODEL_DIR,
+    LOCAL_OCR_MODEL_DIR,
+    is_directory=True,
+)
 
 
 # =========================================================
@@ -132,12 +125,9 @@ def db_connect() -> sqlite3.Connection:
     connection = sqlite3.connect(
         DB_PATH,
         timeout=30,
-        isolation_level=None,
     )
 
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA busy_timeout=30000")
 
     return connection
 
@@ -159,8 +149,6 @@ def column_exists(
 
 def init_db() -> None:
     with db_connect() as connection:
-        connection.execute("PRAGMA journal_mode=WAL")
-
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS rooms (
@@ -197,14 +185,6 @@ def init_db() -> None:
                 reasons TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-
-            CREATE INDEX IF NOT EXISTS
-            idx_messages_room_id
-            ON messages(room_code, id);
-
-            CREATE INDEX IF NOT EXISTS
-            idx_blocked_created
-            ON blocked_messages(created_at DESC);
             """
         )
 
@@ -274,223 +254,215 @@ KOREAN_DIGIT_WORDS: Dict[str, str] = {
 }
 
 CONTACT_KEYWORDS = [
-    "전화번호", "전번", "폰번", "연락처",
-    "번호교환", "번호 교환",
-    "카톡아이디", "카톡 아이디",
-    "카카오아이디", "카카오 아이디",
-    "텔레그램", "인스타", "인스타그램",
-    "디엠", "dm", "오픈채팅", "오픈톡", "오픈링크",
-]
-
-CONTACT_ACTION_WORDS = [
-    "알려", "보내", "남겨", "적어", "추가", "친추",
-    "교환", "연락", "검색", "찾아", "들어와", "줘", "주세요",
+    "전화번호",
+    "전번",
+    "폰번",
+    "연락처",
+    "번호교환",
+    "번호 교환",
+    "카톡아이디",
+    "카톡 아이디",
+    "카카오아이디",
+    "카카오 아이디",
+    "텔레그램",
+    "인스타",
+    "인스타그램",
+    "디엠",
+    "dm",
+    "오픈채팅",
+    "오픈톡",
+    "오픈링크",
 ]
 
 URL_PATTERN = re.compile(
-    r"(?i)(?:https?://|www\.|open\.kakao\.com|"
-    r"pf\.kakao\.com|t\.me/|instagram\.com/)\S+"
+    r"(?i)\b(?:"
+    r"https?://|"
+    r"www\.|"
+    r"open\.kakao\.com|"
+    r"pf\.kakao\.com|"
+    r"t\.me/|"
+    r"instagram\.com/"
+    r")\S+"
 )
 
 EMAIL_PATTERN = re.compile(
-    r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"
+    r"(?i)\b"
+    r"[a-z0-9._%+-]+"
+    r"@"
+    r"[a-z0-9.-]+"
+    r"\.[a-z]{2,}"
+    r"\b"
 )
 
 PHONE_PATTERN = re.compile(
-    r"(?<!\d)(?:\+?82[\s.\-)]*|0)[\s.\-()]*"
-    r"1[016789](?:[\s.\-()]*\d){7,8}(?!\d)"
+    r"(?<!\d)"
+    r"(?:\+?82[\s.\-)]*|0)"
+    r"[\s.\-()]*"
+    r"1[016789]"
+    r"(?:[\s.\-()]*\d){7,8}"
+    r"(?!\d)"
 )
 
 SNS_ID_PATTERN = re.compile(
-    r"(?i)(?:카톡|카카오|텔레그램|인스타|instagram|telegram|line|라인)"
-    r"\s*(?:아이디|id|계정)?\s*[:：]?\s*[@a-z0-9_.\-]{4,}"
-)
-
-AT_HANDLE_PATTERN = re.compile(
-    r"(?<![\w.])@[a-zA-Z0-9_.-]{4,}(?![\w.])"
-)
-
-SEPARATED_NUMBER_PATTERN = re.compile(
-    r"(?<!\d)(?:\d[\s.\-()]{0,3}){9,11}(?!\d)"
-)
-
-DIGIT_WORD_TOKEN_PATTERN = re.compile(
-    r"(?:공|영|빵|일|하나|이|둘|삼|셋|사|넷|오|다섯|육|여섯|"
-    r"칠|일곱|팔|여덟|구|아홉|[0-9oOilI|０-９])"
+    r"(?i)"
+    r"(?:카톡|카카오|텔레그램|인스타|"
+    r"instagram|telegram|line|라인)"
+    r"\s*"
+    r"(?:아이디|id|계정)?"
+    r"\s*[:：]?\s*"
+    r"[@a-z0-9_.\-]{4,}"
 )
 
 
-def normalize_numeric_candidate(text: str) -> str:
+def normalize_for_contact_detection(
+    text: str,
+) -> str:
     value = text.casefold()
 
     replacements = {
-        "o": "0", "ｏ": "0",
-        "l": "1", "i": "1", "|": "1",
-        "０": "0", "１": "1", "２": "2", "３": "3",
-        "４": "4", "５": "5", "６": "6", "７": "7",
-        "８": "8", "９": "9",
+        "o": "0",
+        "ｏ": "0",
+        "l": "1",
+        "i": "1",
+        "|": "1",
+        "０": "0",
+        "１": "1",
+        "２": "2",
+        "３": "3",
+        "４": "4",
+        "５": "5",
+        "６": "6",
+        "７": "7",
+        "８": "8",
+        "９": "9",
     }
 
     for source, target in replacements.items():
-        value = value.replace(source, target)
+        value = value.replace(
+            source,
+            target,
+        )
 
-    for word in sorted(KOREAN_DIGIT_WORDS, key=len, reverse=True):
-        value = value.replace(word, KOREAN_DIGIT_WORDS[word])
+    for word in sorted(
+        KOREAN_DIGIT_WORDS,
+        key=len,
+        reverse=True,
+    ):
+        value = value.replace(
+            word,
+            KOREAN_DIGIT_WORDS[word],
+        )
 
-    return re.sub(r"[^0-9]", "", value)
-
-
-def extract_obfuscated_numeric_candidates(text: str) -> List[str]:
-    candidates: List[str] = []
-    tokens = list(DIGIT_WORD_TOKEN_PATTERN.finditer(text))
-
-    if not tokens:
-        return candidates
-
-    current = tokens[0].group(0)
-    previous_end = tokens[0].end()
-
-    for token in tokens[1:]:
-        gap = text[previous_end:token.start()]
-
-        if len(gap) <= 3 and not re.search(r"[가-힣A-Za-z]", gap):
-            current += gap + token.group(0)
-        else:
-            normalized = normalize_numeric_candidate(current)
-            if len(normalized) >= 9:
-                candidates.append(normalized)
-            current = token.group(0)
-
-        previous_end = token.end()
-
-    normalized = normalize_numeric_candidate(current)
-    if len(normalized) >= 9:
-        candidates.append(normalized)
-
-    return candidates
+    return value
 
 
-def detect_contact_info(text: str) -> List[str]:
+def compact_numeric_text(text: str) -> str:
+    normalized = normalize_for_contact_detection(
+        text
+    )
+
+    return re.sub(
+        r"[^0-9]",
+        "",
+        normalized,
+    )
+
+
+def detect_contact_info(
+    text: str,
+) -> List[str]:
     reasons: List[str] = []
+
     lowered = text.casefold()
 
+    normalized = normalize_for_contact_detection(
+        text
+    )
+
+    compact_digits = compact_numeric_text(
+        text
+    )
+
+    if any(
+        keyword.casefold() in lowered
+        for keyword in CONTACT_KEYWORDS
+    ):
+        reasons.append(
+            "연락처 교환 표현"
+        )
+
     if URL_PATTERN.search(text):
-        reasons.append("외부 링크")
+        reasons.append(
+            "외부 링크"
+        )
 
     if EMAIL_PATTERN.search(text):
-        reasons.append("이메일 주소")
+        reasons.append(
+            "이메일 주소"
+        )
 
-    if PHONE_PATTERN.search(text):
-        reasons.append("전화번호 형식")
+    if PHONE_PATTERN.search(normalized):
+        reasons.append(
+            "전화번호 형식"
+        )
 
-    if SEPARATED_NUMBER_PATTERN.search(text):
-        digits = re.sub(r"\D", "", SEPARATED_NUMBER_PATTERN.search(text).group(0))
-        if re.fullmatch(r"01[016789]\d{7,8}", digits):
-            reasons.append("전화번호 형식")
+    if re.search(
+        r"01[016789]\d{7,8}",
+        compact_digits,
+    ):
+        reasons.append(
+            "우회 전화번호 형식"
+        )
 
-    for candidate in extract_obfuscated_numeric_candidates(text):
-        if re.fullmatch(r"01[016789]\d{7,8}", candidate):
-            reasons.append("우회 전화번호 형식")
-            break
+    if SNS_ID_PATTERN.search(text):
+        reasons.append(
+            "SNS·메신저 ID"
+        )
 
-    if SNS_ID_PATTERN.search(text) or AT_HANDLE_PATTERN.search(text):
-        reasons.append("SNS·메신저 ID")
-
-    has_keyword = any(keyword.casefold() in lowered for keyword in CONTACT_KEYWORDS)
-    has_action = any(action.casefold() in lowered for action in CONTACT_ACTION_WORDS)
-
-    if has_keyword and has_action:
-        reasons.append("연락처 교환 표현")
-
-    return list(dict.fromkeys(reasons))
+    return list(
+        dict.fromkeys(reasons)
+    )
 
 
 # =========================================================
-# OCR - RapidOCR / ONNX Runtime
+# OCR
 # =========================================================
 
-_ocr_engine = None
-_ocr_engine_lock = threading.Lock()
-_ocr_process_lock = threading.Lock()
+_ocr_reader = None
 
 
-def get_ocr_engine():
-    """RapidOCR 엔진을 프로세스당 한 번만 생성한다."""
-    global _ocr_engine
+def get_ocr_reader():
+    global _ocr_reader
 
-    if _ocr_engine is not None:
-        return _ocr_engine
+    if _ocr_reader is None:
+        import easyocr
 
-    with _ocr_engine_lock:
-        if _ocr_engine is None:
-            from rapidocr import RapidOCR
-
-            started = time.perf_counter()
-            _ocr_engine = RapidOCR(
-                params={
-                    "EngineConfig.onnxruntime.intra_op_num_threads": 1,
-                    "EngineConfig.onnxruntime.inter_op_num_threads": 1,
-                    "EngineConfig.onnxruntime.use_cuda": False,
-                    "Global.max_side_len": 960,
-                    "Global.use_cls": False,
-                }
-            )
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            print(
-                f"[OCR] rapidocr_ready={elapsed_ms:.1f}ms",
-                flush=True,
-            )
-
-    return _ocr_engine
-
-
-def parse_rapidocr_text(result) -> str:
-    """RapidOCR 3.x와 구버전 결과에서 문자열만 안전하게 추출한다."""
-    if result is None:
-        return ""
-
-    txts = getattr(result, "txts", None)
-    if txts is not None:
-        return "\n".join(
-            str(text).strip()
-            for text in txts
-            if str(text).strip()
+        _ocr_reader = easyocr.Reader(
+            ["ko", "en"],
+            gpu=False,
+            model_storage_directory=OCR_MODEL_DIR,
+            download_enabled=True,
         )
 
-    # 일부 버전은 (result, elapsed) 튜플을 반환한다.
-    if isinstance(result, tuple) and len(result) == 2:
-        result = result[0]
-
-    if not result:
-        return ""
-
-    texts: List[str] = []
-    for item in result:
-        if not item:
-            continue
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            text = str(item[1]).strip()
-        else:
-            text = str(item).strip()
-        if text:
-            texts.append(text)
-
-    return "\n".join(texts)
+    return _ocr_reader
 
 
-def extract_text_from_image(image_path: str) -> str:
-    engine = get_ocr_engine()
+def extract_text_from_image(
+    image_path: str,
+) -> str:
+    reader = get_ocr_reader()
 
-    # Render 저메모리 환경에서 추론이 겹치지 않도록 직렬화한다.
-    with _ocr_process_lock:
-        result = engine(
-            image_path,
-            use_det=True,
-            use_cls=False,
-            use_rec=True,
-        )
+    results = reader.readtext(
+        image_path,
+        detail=0,
+        paragraph=False,
+    )
 
-    return parse_rapidocr_text(result)
+    return "\n".join(
+        str(item).strip()
+        for item in results
+        if str(item).strip()
+    )
 
 
 # =========================================================
@@ -520,13 +492,6 @@ def save_clean_image(
                 raise ValueError(
                     "JPG, PNG, WEBP 이미지만 가능해."
                 )
-
-            width, height = source_image.size
-
-            if width * height > MAX_IMAGE_PIXELS:
-                raise ValueError("이미지 해상도가 너무 커.")
-
-            source_image = ImageOps.exif_transpose(source_image)
 
             # 비율은 유지하고 최대 변만 줄인다.
             # 원본 해상도 이미지는 서버에 저장하지 않는다.
@@ -1069,21 +1034,21 @@ CHAT_HTML = """
   </main>
 
 <script>
-const roomCode = {{ room_code | tojson }};
-const initialToken = {{ user_token | tojson }};
+const roomCode = "{{ room_code }}";
+const initialToken = "{{ user_token }}";
 const tokenStorageKey = `contact_guard_token_${roomCode}`;
 
-localStorage.setItem(
+sessionStorage.setItem(
   tokenStorageKey,
   initialToken
 );
 
 const userToken =
-  localStorage.getItem(tokenStorageKey)
+  sessionStorage.getItem(tokenStorageKey)
   || initialToken;
 
 let lastMessageId = 0;
-let isSending = false;
+let pollingStopped = false;
 
 const messagesElement =
   document.getElementById("messages");
@@ -1099,16 +1064,6 @@ const fileNameElement =
 
 const noticeElement =
   document.getElementById("notice");
-
-async function readJsonSafely(response) {
-  try {
-    return await response.json();
-  } catch {
-    return {
-      message: `서버 응답 오류 (${response.status})`
-    };
-  }
-}
 
 function authenticatedHeaders(extra = {}) {
   return {
@@ -1140,11 +1095,14 @@ function redirectToHomeOnUnauthorized(
   response
 ) {
   if (response.status === 401) {
-    localStorage.removeItem(
+    pollingStopped = true;
+    sessionStorage.removeItem(
       tokenStorageKey
     );
 
-    window.location.href = "/";
+    showNotice(
+      "채팅방 인증이 끊겼어. 이 탭에서 방에 다시 입장해줘."
+    );
 
     return true;
   }
@@ -1199,7 +1157,7 @@ function addMessage(message) {
 }
 
 async function loadMessages() {
-  if (isSending) {
+  if (pollingStopped) {
     return;
   }
 
@@ -1462,19 +1420,11 @@ document.getElementById(
       );
 
     button.disabled = true;
-    isSending = true;
 
     button.textContent =
       file
         ? "OCR 검사 중..."
         : "전송 중...";
-
-    if (file) {
-      showNotice(
-        "이미지를 압축한 뒤 서버에서 OCR 검사 중이야. 검사 완료 전에는 전송되지 않아.",
-        true
-      );
-    }
 
     try {
       const response = file
@@ -1487,7 +1437,7 @@ document.getElementById(
         return;
       }
 
-      const data = await readJsonSafely(response);
+      const data = await response.json();
 
       if (!response.ok) {
         const reasons =
@@ -1506,6 +1456,7 @@ document.getElementById(
       imageInputElement.value = "";
       fileNameElement.textContent = "";
 
+      pollingStopped = false;
       await loadMessages();
 
     } catch (error) {
@@ -1516,7 +1467,6 @@ document.getElementById(
       );
 
     } finally {
-      isSending = false;
       button.disabled = false;
       button.textContent = "전송";
     }
@@ -1839,7 +1789,7 @@ def join_room():
         with db_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
 
-            row = connection.execute(
+            member_count_row = connection.execute(
                 """
                 SELECT COUNT(*) AS count
                 FROM members
@@ -1848,8 +1798,9 @@ def join_room():
                 (room_code,),
             ).fetchone()
 
-            if int(row["count"]) >= 2:
-                connection.execute("ROLLBACK")
+            if int(member_count_row["count"]) >= 2:
+                connection.rollback()
+
                 return render_template_string(
                     HOME_HTML,
                     error="이미 두 명이 입장한 방이야.",
@@ -1865,12 +1816,15 @@ def join_room():
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                (room_code, user_token, nickname, joined_at),
+                (
+                    room_code,
+                    user_token,
+                    nickname,
+                    joined_at,
+                ),
             )
 
-            connection.execute("COMMIT")
-
-    except Exception:
+    except sqlite3.Error:
         return render_template_string(
             HOME_HTML,
             error="방 입장 처리 중 오류가 발생했어.",
@@ -2127,146 +2081,146 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
-    total_started = time.perf_counter()
-    read_ms = save_ms = reader_ms = ocr_ms = detect_ms = db_ms = 0.0
-
-    uploaded_file = request.files.get("image")
+    uploaded_file = request.files.get(
+        "image"
+    )
 
     if uploaded_file is None:
-        return jsonify({
-            "ok": False,
-            "message": "이미지가 선택되지 않았어.",
-        }), 400
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "이미지가 선택되지 않았어."
+                ),
+            }
+        ), 400
 
-    read_started = time.perf_counter()
-    raw_bytes = uploaded_file.read(MAX_IMAGE_BYTES + 1)
-    read_ms = (time.perf_counter() - read_started) * 1000
-
-    if len(raw_bytes) > MAX_IMAGE_BYTES:
-        return jsonify({
-            "ok": False,
-            "message": "이미지는 최대 8MB까지 가능해.",
-        }), 400
-
-    save_started = time.perf_counter()
+    raw_bytes = uploaded_file.read()
 
     try:
-        filename, image_path = save_clean_image(raw_bytes)
-    except ValueError as error:
-        return jsonify({
-            "ok": False,
-            "message": str(error),
-        }), 400
+        filename, image_path = (
+            save_clean_image(raw_bytes)
+        )
 
-    save_ms = (time.perf_counter() - save_started) * 1000
+    except ValueError as error:
+        return jsonify(
+            {
+                "ok": False,
+                "message": str(error),
+            }
+        ), 400
+
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
 
     try:
-        engine_started = time.perf_counter()
-        get_ocr_engine()
-        reader_ms = (time.perf_counter() - engine_started) * 1000
-
-        ocr_started = time.perf_counter()
-        ocr_text = extract_text_from_image(image_path)
-        ocr_ms = (time.perf_counter() - ocr_started) * 1000
+        ocr_text = extract_text_from_image(
+            image_path
+        )
 
     except Exception as error:
         print(
             "[ERROR] OCR 처리 실패: "
-            f"{type(error).__name__}: {error}",
-            flush=True,
+            f"{error}"
         )
-        Path(image_path).unlink(missing_ok=True)
 
-        return jsonify({
-            "ok": False,
-            "message": "OCR 검사에 실패해서 이미지를 전송하지 않았어.",
-        }), 500
+        try:
+            os.remove(image_path)
+        except OSError:
+            pass
 
-    detect_started = time.perf_counter()
-    reasons = detect_contact_info(ocr_text)
-    detect_ms = (time.perf_counter() - detect_started) * 1000
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "OCR 검사에 실패해서 "
+                    "이미지를 전송하지 않았어."
+                ),
+            }
+        ), 500
+
+    reasons = detect_contact_info(
+        ocr_text
+    )
 
     if reasons:
-        Path(image_path).unlink(missing_ok=True)
+        try:
+            os.remove(image_path)
+        except OSError:
+            pass
 
-        db_started = time.perf_counter()
         with db_connect() as connection:
             connection.execute(
                 """
                 INSERT INTO blocked_messages(
-                    room_code, user_token, nickname, message_type,
-                    content, reasons, created_at
+                    room_code,
+                    user_token,
+                    nickname,
+                    message_type,
+                    content,
+                    reasons,
+                    created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    room_code, user_token, member["nickname"], "image",
-                    ocr_text or "(OCR 텍스트 없음)",
-                    ", ".join(reasons), created_at,
+                    room_code,
+                    user_token,
+                    member["nickname"],
+                    "image",
+                    (
+                        ocr_text
+                        or "(OCR 텍스트 없음)"
+                    ),
+                    ", ".join(reasons),
+                    created_at,
                 ),
             )
-        db_ms = (time.perf_counter() - db_started) * 1000
 
-        total_ms = (time.perf_counter() - total_started) * 1000
-        print(
-            f"[IMAGE] room={room_code} blocked=1 "
-            f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
-            f"engine={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
-            f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
-            f"total={total_ms:.1f}ms",
-            flush=True,
+        return jsonify(
+            {
+                "ok": False,
+                "blocked": True,
+                "message": (
+                    "이미지에서 연락처 또는 "
+                    "외부 연락 수단이 감지되어 "
+                    "전송하지 않았어."
+                ),
+                "reasons": reasons,
+            }
+        ), 400
+
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO messages(
+                room_code,
+                user_token,
+                nickname,
+                message_type,
+                content,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                room_code,
+                user_token,
+                member["nickname"],
+                "image",
+                filename,
+                created_at,
+            ),
         )
 
-        return jsonify({
-            "ok": False,
-            "blocked": True,
-            "message": (
-                "이미지에서 연락처 또는 외부 연락 수단이 감지되어 "
-                "전송하지 않았어."
-            ),
-            "reasons": reasons,
-        }), 400
-
-    db_started = time.perf_counter()
-
-    try:
-        with db_connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO messages(
-                    room_code, user_token, nickname,
-                    message_type, content, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    room_code, user_token, member["nickname"],
-                    "image", filename, created_at,
-                ),
-            )
-    except Exception:
-        Path(image_path).unlink(missing_ok=True)
-        raise
-
-    db_ms = (time.perf_counter() - db_started) * 1000
-    total_ms = (time.perf_counter() - total_started) * 1000
-
-    print(
-        f"[IMAGE] room={room_code} blocked=0 "
-        f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
-        f"engine={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
-        f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
-        f"total={total_ms:.1f}ms",
-        flush=True,
+    return jsonify(
+        {
+            "ok": True,
+            "message_id": cursor.lastrowid,
+            "ocr_text": ocr_text,
+        }
     )
-
-    return jsonify({
-        "ok": True,
-        "message_id": cursor.lastrowid,
-    })
 
 
 @app.route(
@@ -2313,7 +2267,7 @@ def admin_login():
             "",
         )
 
-        if ADMIN_PASSWORD and secrets.compare_digest(
+        if secrets.compare_digest(
             password,
             ADMIN_PASSWORD,
         ):
@@ -2418,9 +2372,6 @@ def health():
             ),
             "db_path": DB_PATH,
             "upload_dir": UPLOAD_DIR,
-            "ocr_engine": "rapidocr-onnxruntime",
-            "ocr_loaded": _ocr_engine is not None,
-            "admin_password_configured": bool(ADMIN_PASSWORD),
         }
     )
 
