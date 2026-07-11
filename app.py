@@ -1,10 +1,17 @@
 # Render 권장 Start Command:
-# gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 180
+# gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
 #
 # 이 파일은 GitHub에서 app.py 이름으로 사용해야 한다.
 
 import io
 import os
+# ONNX/OpenCV가 Render의 가상 CPU 수만큼 스레드를 만들지 않도록 제한한다.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+
 import re
 import sqlite3
 import secrets
@@ -45,14 +52,8 @@ PREFERRED_UPLOAD_DIR = os.environ.get(
     "/var/data/contact_guard_uploads",
 ).strip()
 
-PREFERRED_OCR_MODEL_DIR = os.environ.get(
-    "OCR_MODEL_DIR",
-    "/var/data/easyocr_models",
-).strip()
-
 LOCAL_DB_PATH = "contact_guard_chat.db"
 LOCAL_UPLOAD_DIR = "contact_guard_uploads"
-LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_SIDE = 1280
@@ -121,11 +122,6 @@ UPLOAD_DIR = resolve_writable_path(
     is_directory=True,
 )
 
-OCR_MODEL_DIR = resolve_writable_path(
-    PREFERRED_OCR_MODEL_DIR,
-    LOCAL_OCR_MODEL_DIR,
-    is_directory=True,
-)
 
 
 # =========================================================
@@ -410,56 +406,91 @@ def detect_contact_info(text: str) -> List[str]:
 
 
 # =========================================================
-# OCR
+# OCR - RapidOCR / ONNX Runtime
 # =========================================================
 
-_ocr_reader = None
-_ocr_reader_lock = threading.Lock()
+_ocr_engine = None
+_ocr_engine_lock = threading.Lock()
 _ocr_process_lock = threading.Lock()
 
 
-def get_ocr_reader():
-    global _ocr_reader
+def get_ocr_engine():
+    """RapidOCR 엔진을 프로세스당 한 번만 생성한다."""
+    global _ocr_engine
 
-    if _ocr_reader is not None:
-        return _ocr_reader
+    if _ocr_engine is not None:
+        return _ocr_engine
 
-    with _ocr_reader_lock:
-        if _ocr_reader is None:
-            import easyocr
+    with _ocr_engine_lock:
+        if _ocr_engine is None:
+            from rapidocr import RapidOCR
 
             started = time.perf_counter()
-            _ocr_reader = easyocr.Reader(
-                ["ko", "en"],
-                gpu=False,
-                model_storage_directory=OCR_MODEL_DIR,
-                download_enabled=True,
+            _ocr_engine = RapidOCR(
+                params={
+                    "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                    "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                    "EngineConfig.onnxruntime.use_cuda": False,
+                    "Global.max_side_len": 960,
+                    "Global.use_cls": False,
+                }
             )
             elapsed_ms = (time.perf_counter() - started) * 1000
             print(
-                f"[OCR] reader_ready={elapsed_ms:.1f}ms",
+                f"[OCR] rapidocr_ready={elapsed_ms:.1f}ms",
                 flush=True,
             )
 
-    return _ocr_reader
+    return _ocr_engine
 
 
-def extract_text_from_image(
-    image_path: str,
-) -> str:
-    reader = get_ocr_reader()
+def parse_rapidocr_text(result) -> str:
+    """RapidOCR 3.x와 구버전 결과에서 문자열만 안전하게 추출한다."""
+    if result is None:
+        return ""
 
-    results = reader.readtext(
-        image_path,
-        detail=0,
-        paragraph=False,
-    )
+    txts = getattr(result, "txts", None)
+    if txts is not None:
+        return "\n".join(
+            str(text).strip()
+            for text in txts
+            if str(text).strip()
+        )
 
-    return "\n".join(
-        str(item).strip()
-        for item in results
-        if str(item).strip()
-    )
+    # 일부 버전은 (result, elapsed) 튜플을 반환한다.
+    if isinstance(result, tuple) and len(result) == 2:
+        result = result[0]
+
+    if not result:
+        return ""
+
+    texts: List[str] = []
+    for item in result:
+        if not item:
+            continue
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            text = str(item[1]).strip()
+        else:
+            text = str(item).strip()
+        if text:
+            texts.append(text)
+
+    return "\n".join(texts)
+
+
+def extract_text_from_image(image_path: str) -> str:
+    engine = get_ocr_engine()
+
+    # Render 저메모리 환경에서 추론이 겹치지 않도록 직렬화한다.
+    with _ocr_process_lock:
+        result = engine(
+            image_path,
+            use_det=True,
+            use_cls=False,
+            use_rec=True,
+        )
+
+    return parse_rapidocr_text(result)
 
 
 # =========================================================
@@ -1052,6 +1083,7 @@ const userToken =
   || initialToken;
 
 let lastMessageId = 0;
+let isSending = false;
 
 const messagesElement =
   document.getElementById("messages");
@@ -1167,6 +1199,10 @@ function addMessage(message) {
 }
 
 async function loadMessages() {
+  if (isSending) {
+    return;
+  }
+
   try {
     const response = await fetch(
       `/api/room/${roomCode}/messages?after=${lastMessageId}`,
@@ -1426,11 +1462,19 @@ document.getElementById(
       );
 
     button.disabled = true;
+    isSending = true;
 
     button.textContent =
       file
         ? "OCR 검사 중..."
         : "전송 중...";
+
+    if (file) {
+      showNotice(
+        "이미지를 압축한 뒤 서버에서 OCR 검사 중이야. 검사 완료 전에는 전송되지 않아.",
+        true
+      );
+    }
 
     try {
       const response = file
@@ -1472,6 +1516,7 @@ document.getElementById(
       );
 
     } finally {
+      isSending = false;
       button.disabled = false;
       button.textContent = "전송";
     }
@@ -2119,29 +2164,13 @@ def send_image(room_code: str):
     created_at = now_kst_iso()
 
     try:
-        reader_started = time.perf_counter()
-        reader = get_ocr_reader()
-        reader_ms = (time.perf_counter() - reader_started) * 1000
+        engine_started = time.perf_counter()
+        get_ocr_engine()
+        reader_ms = (time.perf_counter() - engine_started) * 1000
 
         ocr_started = time.perf_counter()
-
-        # EasyOCR/PyTorch 추론은 동시에 여러 번 실행될 때
-        # Render의 제한된 메모리를 크게 사용할 수 있으므로 직렬화한다.
-        with _ocr_process_lock:
-            results = reader.readtext(
-                image_path,
-                detail=0,
-                paragraph=False,
-                workers=0,
-            )
-
+        ocr_text = extract_text_from_image(image_path)
         ocr_ms = (time.perf_counter() - ocr_started) * 1000
-
-        ocr_text = "\n".join(
-            str(item).strip()
-            for item in results
-            if str(item).strip()
-        )
 
     except Exception as error:
         print(
@@ -2185,7 +2214,7 @@ def send_image(room_code: str):
         print(
             f"[IMAGE] room={room_code} blocked=1 "
             f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
-            f"reader={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
+            f"engine={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
             f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
             f"total={total_ms:.1f}ms",
             flush=True,
@@ -2228,7 +2257,7 @@ def send_image(room_code: str):
     print(
         f"[IMAGE] room={room_code} blocked=0 "
         f"read={read_ms:.1f}ms save={save_ms:.1f}ms "
-        f"reader={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
+        f"engine={reader_ms:.1f}ms ocr={ocr_ms:.1f}ms "
         f"detect={detect_ms:.1f}ms db={db_ms:.1f}ms "
         f"total={total_ms:.1f}ms",
         flush=True,
@@ -2389,8 +2418,8 @@ def health():
             ),
             "db_path": DB_PATH,
             "upload_dir": UPLOAD_DIR,
-            "ocr_model_dir": OCR_MODEL_DIR,
-            "ocr_loaded": _ocr_reader is not None,
+            "ocr_engine": "rapidocr-onnxruntime",
+            "ocr_loaded": _ocr_engine is not None,
             "admin_password_configured": bool(ADMIN_PASSWORD),
         }
     )
