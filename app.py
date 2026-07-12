@@ -220,6 +220,27 @@ def init_db() -> None:
 
         if not column_exists(
             connection,
+            "messages",
+            "upload_key",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE messages
+                ADD COLUMN upload_key TEXT
+                """
+            )
+
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_messages_unique_upload
+            ON messages(room_code, user_token, upload_key)
+            WHERE upload_key IS NOT NULL
+            """
+        )
+
+        if not column_exists(
+            connection,
             "blocked_messages",
             "message_type",
         ):
@@ -1213,12 +1234,20 @@ async function sendText(content) {
   );
 }
 
-async function sendImage(file) {
+async function sendImage(
+  file,
+  uploadKey
+) {
   const formData = new FormData();
 
   formData.append(
     "image",
     file
+  );
+
+  formData.append(
+    "upload_key",
+    uploadKey
   );
 
   return fetch(
@@ -1285,8 +1314,18 @@ document.getElementById(
         : "전송 중...";
 
     try {
+      const uploadKey = file
+        ? (
+            window.crypto?.randomUUID?.()
+            || `${Date.now()}-${Math.random()}`
+          )
+        : null;
+
       const response = file
-        ? await sendImage(file)
+        ? await sendImage(
+            file,
+            uploadKey
+          )
         : await sendText(content);
 
       if (
@@ -1913,20 +1952,54 @@ def send_message(room_code: str):
     )
 
 
-    @app.route(
-        "/api/room/<room_code>/image",
-        methods=["POST"],
-    )
-    @require_room_member_api
-    def send_image(room_code: str):
-     request_id = uuid.uuid4().hex
+@app.route(
+    "/api/room/<room_code>/image",
+    methods=["POST"],
+)
+@require_room_member_api
+def send_image(room_code: str):
+    upload_key = request.form.get(
+        "upload_key",
+        "",
+    ).strip()[:100]
 
-    print(
-        f"[IMAGE] request started "
-        f"id={request_id} "
-        f"room={room_code}",
-        flush=True,
-    )
+    if not upload_key:
+        return jsonify(
+            {
+                "ok": False,
+                "message": "이미지 전송 식별값이 없어.",
+            }
+        ), 400
+
+    member = request.room_member
+    user_token = request.user_token
+
+    # 동일한 이미지 전송 요청이 재시도된 경우 기존 메시지를 그대로 반환한다.
+    with db_connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM messages
+            WHERE room_code = ?
+              AND user_token = ?
+              AND upload_key = ?
+            LIMIT 1
+            """,
+            (
+                room_code,
+                user_token,
+                upload_key,
+            ),
+        ).fetchone()
+
+    if existing is not None:
+        return jsonify(
+            {
+                "ok": True,
+                "message_id": existing["id"],
+                "duplicate": True,
+            }
+        )
 
     uploaded_file = request.files.get("image")
 
@@ -1997,8 +2070,6 @@ def send_message(room_code: str):
             }
         ), 500
 
-    member = request.room_member
-    user_token = request.user_token
     created_at = now_kst_iso()
 
     if reasons:
@@ -2013,13 +2084,6 @@ def send_message(room_code: str):
                     f"{error}",
                     flush=True,
                 )
-
-print(
-    f"[IMAGE] database insert "
-    f"id={request_id} "
-    f"filename={filename}",
-    flush=True,
-)
 
         with db_connect() as connection:
             connection.execute(
@@ -2059,49 +2123,78 @@ print(
             }
         ), 400
 
-    print(
-        f"[IMAGE] database insert "
-        f"id={request_id} "
-        f"filename={filename}",
-        flush=True,
-    )
-
-    with db_connect() as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO messages(
-                room_code,
-                user_token,
-                nickname,
-                message_type,
-                content,
-                created_at
+    try:
+        with db_connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO messages(
+                    room_code,
+                    user_token,
+                    nickname,
+                    message_type,
+                    content,
+                    created_at,
+                    upload_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    room_code,
+                    user_token,
+                    member["nickname"],
+                    "image",
+                    filename,
+                    created_at,
+                    upload_key,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                room_code,
-                user_token,
-                member["nickname"],
-                "image",
-                filename,
-                created_at,
-            ),
-        )
 
-    print(
-        f"[IMAGE] request finished "
-        f"id={request_id} "
-        f"message_id={cursor.lastrowid}",
-        flush=True,
-    )
+        message_id = cursor.lastrowid
+
+    except sqlite3.IntegrityError:
+        # 같은 요청이 동시에 여러 번 도착했을 때 중복 파일은 제거한다.
+        if image_path:
+            try:
+                Path(image_path).unlink(
+                    missing_ok=True
+                )
+            except OSError:
+                pass
+
+        with db_connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id
+                FROM messages
+                WHERE room_code = ?
+                  AND user_token = ?
+                  AND upload_key = ?
+                LIMIT 1
+                """,
+                (
+                    room_code,
+                    user_token,
+                    upload_key,
+                ),
+            ).fetchone()
+
+        if existing is None:
+            return jsonify(
+                {
+                    "ok": False,
+                    "message": "이미지 저장 중 충돌이 발생했어.",
+                }
+            ), 500
+
+        message_id = existing["id"]
 
     return jsonify(
         {
             "ok": True,
-            "message_id": cursor.lastrowid,
+            "message_id": message_id,
         }
     )
+
 
 @app.route(
     "/uploads/<path:filename>",
