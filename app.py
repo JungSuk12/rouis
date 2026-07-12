@@ -19,7 +19,7 @@ from flask import (
     session,
     url_for,
 )
-from PIL import Image, ImageOps
+from PIL import Image
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -47,13 +47,7 @@ LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-MAX_IMAGE_SIDE = 1280
-MAX_IMAGE_PIXELS = 40_000_000
-JPEG_QUALITY = 82
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
-
-# 압축 폭탄 이미지로 인한 과도한 메모리 사용 방지
-Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 # =========================================================
@@ -439,23 +433,13 @@ def get_ocr_reader():
     global _ocr_reader
 
     if _ocr_reader is None:
-        print(
-            "[OCR] EasyOCR Reader loading...",
-            flush=True,
-        )
-
         import easyocr
 
         _ocr_reader = easyocr.Reader(
-    ["ko", "en"],
-    gpu=False,
-    model_storage_directory=OCR_MODEL_DIR,
-    download_enabled=False,
-)
-
-        print(
-            "[OCR] EasyOCR Reader ready",
-            flush=True,
+            ["ko", "en"],
+            gpu=False,
+            model_storage_directory=OCR_MODEL_DIR,
+            download_enabled=True,
         )
 
     return _ocr_reader
@@ -466,26 +450,10 @@ def extract_text_from_image(
 ) -> str:
     reader = get_ocr_reader()
 
-    print(
-        f"[OCR] readtext started path={image_path}",
-        flush=True,
-    )
-
     results = reader.readtext(
         image_path,
         detail=0,
         paragraph=False,
-        decoder="greedy",
-        beamWidth=1,
-        batch_size=1,
-        workers=0,
-        canvas_size=1280,
-        mag_ratio=1.0,
-    )
-
-    print(
-        f"[OCR] readtext finished count={len(results)}",
-        flush=True,
     )
 
     return "\n".join(
@@ -513,100 +481,47 @@ def save_clean_image(
         )
 
     try:
-        with Image.open(
+        image = Image.open(
             io.BytesIO(raw_bytes)
-        ) as source_image:
-            source_format = (
-                source_image.format
-                or ""
-            ).upper()
+        )
 
-            if source_format not in ALLOWED_IMAGE_FORMATS:
-                raise ValueError(
-                    "JPG, PNG, WEBP 이미지만 가능해."
-                )
-
-            width, height = source_image.size
-
-            if width <= 0 or height <= 0:
-                raise ValueError(
-                    "이미지 크기가 올바르지 않아."
-                )
-
-            if width * height > MAX_IMAGE_PIXELS:
-                raise ValueError(
-                    "이미지 해상도가 너무 커."
-                )
-
-            # JPEG는 가능한 경우 전체 해상도로 디코딩하기 전에
-            # 축소 디코딩을 요청해 순간 메모리 사용량을 줄인다.
-            if source_format == "JPEG":
-                source_image.draft(
-                    "RGB",
-                    (
-                        MAX_IMAGE_SIDE,
-                        MAX_IMAGE_SIDE,
-                    ),
-                )
-
-            source_image.load()
-
-            transposed_image = (
-                ImageOps.exif_transpose(
-                    source_image
-                )
-            )
-
-            try:
-                clean_image = (
-                    transposed_image.convert(
-                        "RGB"
-                    )
-                )
-            finally:
-                if (
-                    transposed_image
-                    is not source_image
-                ):
-                    transposed_image.close()
-
-    except ValueError:
-        raise
+        image.load()
 
     except Exception as error:
         raise ValueError(
             "이미지 파일을 읽을 수 없어."
         ) from error
 
-    try:
-        if max(clean_image.size) > MAX_IMAGE_SIDE:
-            clean_image.thumbnail(
-                (
-                    MAX_IMAGE_SIDE,
-                    MAX_IMAGE_SIDE,
-                ),
-                Image.Resampling.LANCZOS,
-                reducing_gap=2.0,
-            )
-
-        filename = (
-            f"{uuid.uuid4().hex}.jpg"
+    if image.format not in ALLOWED_IMAGE_FORMATS:
+        raise ValueError(
+            "JPG, PNG, WEBP 이미지만 가능해."
         )
 
-        save_path = (
-            Path(UPLOAD_DIR)
-            / filename
+    # EXIF 등 메타데이터 제거
+    image = image.convert("RGB")
+
+    max_side = 1800
+
+    if max(image.size) > max_side:
+        image.thumbnail(
+            (max_side, max_side)
         )
 
-        # optimize/progressive는 저장 중 추가 메모리를 사용할 수 있어 제외
-        clean_image.save(
-            save_path,
-            format="JPEG",
-            quality=JPEG_QUALITY,
-        )
+    filename = (
+        f"{uuid.uuid4().hex}.jpg"
+    )
 
-    finally:
-        clean_image.close()
+    save_path = (
+        Path(UPLOAD_DIR)
+        / filename
+    )
+
+    image.save(
+        save_path,
+        format="JPEG",
+        quality=88,
+        optimize=True,
+    )
 
     return (
         filename,
@@ -1979,11 +1894,6 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
-    print(
-        f"[IMAGE] upload route entered room={room_code}",
-        flush=True,
-    )
-
     uploaded_file = request.files.get(
         "image"
     )
@@ -2000,19 +1910,9 @@ def send_image(room_code: str):
 
     raw_bytes = uploaded_file.read()
 
-    print(
-        f"[IMAGE] received bytes={len(raw_bytes)}",
-        flush=True,
-    )
-
     try:
         filename, image_path = (
             save_clean_image(raw_bytes)
-        )
-
-        print(
-            f"[IMAGE] saved path={image_path}",
-            flush=True,
         )
 
     except ValueError as error:
@@ -2023,27 +1923,13 @@ def send_image(room_code: str):
             }
         ), 400
 
-    finally:
-        # 원본 업로드 바이트를 OCR 시작 전에 해제
-        del raw_bytes
-
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
 
     try:
-        print(
-            f"[OCR] inspection started room={room_code}",
-            flush=True,
-        )
-
         ocr_text = extract_text_from_image(
             image_path
-        )
-
-        print(
-            f"[OCR] inspection finished room={room_code}",
-            flush=True,
         )
 
     except Exception as error:
@@ -2140,11 +2026,6 @@ def send_image(room_code: str):
                 created_at,
             ),
         )
-
-    print(
-        f"[IMAGE] message inserted id={cursor.lastrowid}",
-        flush=True,
-    )
 
     return jsonify(
         {
