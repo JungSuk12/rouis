@@ -37,8 +37,11 @@ PREFERRED_UPLOAD_DIR = os.environ.get(
     "/var/data/contact_guard_uploads",
 ).strip()
 
+LOCAL_DB_PATH = "contact_guard_chat.db"
+LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
@@ -172,7 +175,7 @@ def init_db() -> None:
             """
         )
 
-        # 기존 DB가 OCR 이전 버전이어도 자동 보정
+        # 기존 DB 컬럼이 없어도 자동 보정
         if not column_exists(
             connection,
             "messages",
@@ -1400,7 +1403,7 @@ ADMIN_HTML = """
             <th>닉네임</th>
             <th>유형</th>
             <th>사유</th>
-            <th>원문/OCR</th>
+            <th>원문</th>
           </tr>
 
           {% for row in blocked %}
@@ -2020,6 +2023,7 @@ def health():
             "service": (
                 "contact-guard-chat"
             ),
+            "ocr": False,
             "auth_mode": (
                 "room-token-header"
             ),
