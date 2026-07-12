@@ -40,7 +40,7 @@ OCR_CONTRAST = float(
 
 OCR_MODEL_DIR = os.environ.get(
     "OCR_MODEL_DIR",
-    "/var/data/easyocr-models",
+    "easyocr-models",
 ).strip()
 
 
