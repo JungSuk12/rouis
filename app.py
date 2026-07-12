@@ -32,10 +32,10 @@ from flask import (
 )
 from PIL import Image, ImageOps
 
-from ocr_service import (
-    extract_text_from_image,
-    is_ocr_loaded,
-)
+# from ocr_service import (
+#     extract_text_from_image,
+#     is_ocr_loaded,
+# )
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -1907,19 +1907,24 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
-    uploaded_file = request.files.get("image")
+    uploaded_file = request.files.get(
+        "image"
+    )
 
     if uploaded_file is None:
         return jsonify(
             {
                 "ok": False,
-                "message": "이미지가 선택되지 않았어.",
+                "message": (
+                    "이미지가 선택되지 않았어."
+                ),
             }
         ), 400
 
     raw_bytes = uploaded_file.read()
 
     image_path = None
+    filename = ""
     ocr_text = ""
     reasons = []
 
@@ -1928,27 +1933,39 @@ def send_image(room_code: str):
             raw_bytes
         )
 
-        ocr_text = extract_text_from_image(
-            image_path
-        )
+        # =================================================
+        # OCR 임시 비활성화
+        # =================================================
+        #
+        # ocr_text = extract_text_from_image(
+        #     image_path
+        # )
+        #
+        # reasons = detect_contact_info(
+        #     ocr_text
+        # )
 
-        reasons = detect_contact_info(
-            ocr_text
-        )
+        ocr_text = ""
+        reasons = []
 
     except ValueError as error:
         if image_path:
             try:
-                Path(image_path).unlink(
+                Path(
+                    image_path
+                ).unlink(
                     missing_ok=True
                 )
+
             except OSError:
                 pass
 
         return jsonify(
             {
                 "ok": False,
-                "message": str(error),
+                "message": str(
+                    error
+                ),
             }
         ), 400
 
@@ -1957,23 +1974,46 @@ def send_image(room_code: str):
 
         traceback.print_exc()
 
-        # OCR이 실패해도 저장된 이미지는 삭제하지 않고 전송한다.
-        ocr_text = ""
-        reasons = []
+        if image_path:
+            try:
+                Path(
+                    image_path
+                ).unlink(
+                    missing_ok=True
+                )
+
+            except OSError:
+                pass
+
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "이미지 처리 중 "
+                    "오류가 발생했어."
+                ),
+            }
+        ), 500
 
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
 
+    # OCR를 다시 켰을 때 사용하는 차단 처리
+    # 현재 reasons는 빈 리스트이므로 실행되지 않음
     if reasons:
         if image_path:
             try:
-                Path(image_path).unlink(
+                Path(
+                    image_path
+                ).unlink(
                     missing_ok=True
                 )
+
             except OSError as error:
                 print(
-                    "[OCR] blocked image delete failed: "
+                    "[IMAGE] blocked image "
+                    "delete failed: "
                     f"{error}",
                     flush=True,
                 )
@@ -1998,7 +2038,9 @@ def send_image(room_code: str):
                     member["nickname"],
                     "image",
                     ocr_text[:2000],
-                    ", ".join(reasons),
+                    ", ".join(
+                        reasons
+                    ),
                     created_at,
                 ),
             )
@@ -2189,29 +2231,14 @@ def health():
         {
             "status": "healthy",
             "service": (
-                "contact-guard-chat-ocr"
+                "contact-guard-chat"
             ),
             "auth_mode": (
                 "room-token-header"
             ),
             "db_path": DB_PATH,
             "upload_dir": UPLOAD_DIR,
-            "ocr_loaded": is_ocr_loaded(),
-            "ocr_concurrency": 1,
+            "ocr_loaded": False,
+            "ocr_concurrency": 0,
         }
-    )
-
-
-if __name__ == "__main__":
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000",
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
     )
