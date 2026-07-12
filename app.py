@@ -1,5 +1,16 @@
 import io
 import os
+
+# =========================================================
+# 저메모리 CPU 설정
+# =========================================================
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+
 import re
 import sqlite3
 import secrets
@@ -7,7 +18,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from flask import (
     Flask,
@@ -20,6 +31,11 @@ from flask import (
     url_for,
 )
 from PIL import Image, ImageOps
+
+from ocr_service import (
+    extract_text_from_image,
+    is_ocr_loaded,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -41,8 +57,21 @@ LOCAL_DB_PATH = "contact_guard_chat.db"
 LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 
 
-MAX_IMAGE_BYTES = 5 * 512 * 512
-ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+
+# 상대방에게 실제 표시하고 저장할 이미지 크기
+MAX_IMAGE_SIDE = 1280
+
+# EasyOCR에만 전달할 임시 이미지 크기
+
+MAX_IMAGE_PIXELS = 20_000_000
+JPEG_QUALITY = 82
+
+ALLOWED_IMAGE_FORMATS = {
+    "JPEG",
+    "PNG",
+    "WEBP",
+}
 
 
 # =========================================================
@@ -420,22 +449,41 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
     if not raw_bytes:
         raise ValueError("이미지 내용이 비어 있어.")
 
-    if len(raw_bytes) > 5 * 1024 * 1024:
-        raise ValueError("이미지는 최대 5MB까지 가능해.")
+    if len(raw_bytes) > MAX_IMAGE_BYTES:
+        max_mb = MAX_IMAGE_BYTES / (1024 * 1024)
+
+        raise ValueError(
+            f"이미지는 최대 {max_mb:g}MB까지 가능해."
+        )
+
+    image = None
 
     try:
         with Image.open(io.BytesIO(raw_bytes)) as source_image:
+            if source_image.format not in ALLOWED_IMAGE_FORMATS:
+                raise ValueError(
+                    "JPG, PNG, WEBP 이미지만 가능해."
+                )
+
+            width, height = source_image.size
+
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    "이미지 해상도가 너무 커."
+                )
+
             source_image.load()
 
-            if source_image.format not in ALLOWED_IMAGE_FORMATS:
-                raise ValueError("JPG, PNG, WEBP 이미지만 가능해.")
+            image = ImageOps.exif_transpose(
+                source_image
+            ).convert("RGB")
 
-            image = ImageOps.exif_transpose(source_image).convert("RGB")
-
-            max_side = 1600
-            if max(image.size) > max_side:
+            if max(image.size) > MAX_IMAGE_SIDE:
                 image.thumbnail(
-                    (max_side, max_side),
+                    (
+                        MAX_IMAGE_SIDE,
+                        MAX_IMAGE_SIDE,
+                    ),
                     Image.Resampling.LANCZOS,
                 )
 
@@ -445,18 +493,31 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
             image.save(
                 save_path,
                 format="JPEG",
-                quality=82,
-                optimize=True,
-                progressive=True,
+                quality=JPEG_QUALITY,
+
+                # 메모리 절약 우선
+                optimize=False,
+                progressive=False,
             )
 
     except ValueError:
         raise
+
+    except Image.DecompressionBombError as error:
+        raise ValueError(
+            "이미지 해상도가 너무 커."
+        ) from error
+
     except Exception as error:
-        raise ValueError("이미지 파일을 읽을 수 없어.") from error
+        raise ValueError(
+            "이미지 파일을 읽을 수 없어."
+        ) from error
+
+    finally:
+        if image is not None:
+            image.close()
 
     return filename, str(save_path)
-
 
 # =========================================================
 # 방/사용자 토큰
@@ -1835,9 +1896,32 @@ def send_image(room_code: str):
 
     raw_bytes = uploaded_file.read()
 
+    image_path = None
+    ocr_text = ""
+    reasons = []
+
     try:
-        filename, _ = save_clean_image(raw_bytes)
+        filename, image_path = save_clean_image(
+            raw_bytes
+        )
+
+        ocr_text = extract_text_from_image(
+            image_path
+        )
+
+        reasons = detect_contact_info(
+            ocr_text
+        )
+
     except ValueError as error:
+        if image_path:
+            try:
+                Path(image_path).unlink(
+                    missing_ok=True
+                )
+            except OSError:
+                pass
+
         return jsonify(
             {
                 "ok": False,
@@ -1845,9 +1929,84 @@ def send_image(room_code: str):
             }
         ), 400
 
+    except Exception as error:
+        print(
+            "[OCR] image inspection failed: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+
+        if image_path:
+            try:
+                Path(image_path).unlink(
+                    missing_ok=True
+                )
+            except OSError:
+                pass
+
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "이미지 검사 중 오류가 발생했어."
+                ),
+            }
+        ), 500
+
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
+
+    if reasons:
+        if image_path:
+            try:
+                Path(image_path).unlink(
+                    missing_ok=True
+                )
+            except OSError as error:
+                print(
+                    "[OCR] blocked image delete failed: "
+                    f"{error}",
+                    flush=True,
+                )
+
+        with db_connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO blocked_messages(
+                    room_code,
+                    user_token,
+                    nickname,
+                    message_type,
+                    content,
+                    reasons,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    room_code,
+                    user_token,
+                    member["nickname"],
+                    "image",
+                    ocr_text[:2000],
+                    ", ".join(reasons),
+                    created_at,
+                ),
+            )
+
+        return jsonify(
+            {
+                "ok": False,
+                "blocked": True,
+                "message": (
+                    "이미지에서 연락처 또는 "
+                    "외부 연락 수단이 감지되어 "
+                    "전송하지 않았어."
+                ),
+                "reasons": reasons,
+            }
+        ), 400
 
     with db_connect() as connection:
         cursor = connection.execute(
@@ -1878,6 +2037,7 @@ def send_image(room_code: str):
             "message_id": cursor.lastrowid,
         }
     )
+
 
 @app.route(
     "/uploads/<path:filename>",
@@ -2021,14 +2181,15 @@ def health():
         {
             "status": "healthy",
             "service": (
-                "contact-guard-chat"
+                "contact-guard-chat-ocr"
             ),
-            "ocr": False,
             "auth_mode": (
                 "room-token-header"
             ),
             "db_path": DB_PATH,
             "upload_dir": UPLOAD_DIR,
+            "ocr_loaded": is_ocr_loaded(),
+            "ocr_concurrency": 1,
         }
     )
 
