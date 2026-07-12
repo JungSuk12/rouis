@@ -19,7 +19,7 @@ from flask import (
     session,
     url_for,
 )
-from PIL import Image
+from PIL import Image, ImageOps
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -37,14 +37,6 @@ PREFERRED_UPLOAD_DIR = os.environ.get(
     "/var/data/contact_guard_uploads",
 ).strip()
 
-PREFERRED_OCR_MODEL_DIR = os.environ.get(
-    "OCR_MODEL_DIR",
-    "/var/data/easyocr_models",
-).strip()
-
-LOCAL_DB_PATH = "contact_guard_chat.db"
-LOCAL_UPLOAD_DIR = "contact_guard_uploads"
-LOCAL_OCR_MODEL_DIR = "easyocr_models"
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
@@ -105,12 +97,6 @@ DB_PATH = resolve_writable_path(
 UPLOAD_DIR = resolve_writable_path(
     PREFERRED_UPLOAD_DIR,
     LOCAL_UPLOAD_DIR,
-    is_directory=True,
-)
-
-OCR_MODEL_DIR = resolve_writable_path(
-    PREFERRED_OCR_MODEL_DIR,
-    LOCAL_OCR_MODEL_DIR,
     is_directory=True,
 )
 
@@ -422,111 +408,51 @@ def detect_contact_info(
     )
 
 
-# =========================================================
-# OCR
-# =========================================================
-
-_ocr_reader = None
-
-
-def get_ocr_reader():
-    global _ocr_reader
-
-    if _ocr_reader is None:
-        import easyocr
-
-        _ocr_reader = easyocr.Reader(
-            ["ko", "en"],
-            gpu=False,
-            model_storage_directory=OCR_MODEL_DIR,
-            download_enabled=True,
-        )
-
-    return _ocr_reader
-
-
-def extract_text_from_image(
-    image_path: str,
-) -> str:
-    reader = get_ocr_reader()
-
-    results = reader.readtext(
-        image_path,
-        detail=0,
-        paragraph=False,
-    )
-
-    return "\n".join(
-        str(item).strip()
-        for item in results
-        if str(item).strip()
-    )
-
 
 # =========================================================
 # 이미지 저장
 # =========================================================
 
-def save_clean_image(
-    raw_bytes: bytes,
-) -> Tuple[str, str]:
+def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
     if not raw_bytes:
-        raise ValueError(
-            "이미지 내용이 비어 있어."
-        )
+        raise ValueError("이미지 내용이 비어 있어.")
 
-    if len(raw_bytes) > MAX_IMAGE_BYTES:
-        raise ValueError(
-            "이미지는 최대 8MB까지 가능해."
-        )
+    if len(raw_bytes) > 5 * 1024 * 1024:
+        raise ValueError("이미지는 최대 5MB까지 가능해.")
 
     try:
-        image = Image.open(
-            io.BytesIO(raw_bytes)
-        )
+        with Image.open(io.BytesIO(raw_bytes)) as source_image:
+            source_image.load()
 
-        image.load()
+            if source_image.format not in ALLOWED_IMAGE_FORMATS:
+                raise ValueError("JPG, PNG, WEBP 이미지만 가능해.")
 
+            image = ImageOps.exif_transpose(source_image).convert("RGB")
+
+            max_side = 1600
+            if max(image.size) > max_side:
+                image.thumbnail(
+                    (max_side, max_side),
+                    Image.Resampling.LANCZOS,
+                )
+
+            filename = f"{uuid.uuid4().hex}.jpg"
+            save_path = Path(UPLOAD_DIR) / filename
+
+            image.save(
+                save_path,
+                format="JPEG",
+                quality=82,
+                optimize=True,
+                progressive=True,
+            )
+
+    except ValueError:
+        raise
     except Exception as error:
-        raise ValueError(
-            "이미지 파일을 읽을 수 없어."
-        ) from error
+        raise ValueError("이미지 파일을 읽을 수 없어.") from error
 
-    if image.format not in ALLOWED_IMAGE_FORMATS:
-        raise ValueError(
-            "JPG, PNG, WEBP 이미지만 가능해."
-        )
-
-    # EXIF 등 메타데이터 제거
-    image = image.convert("RGB")
-
-    max_side = 1800
-
-    if max(image.size) > max_side:
-        image.thumbnail(
-            (max_side, max_side)
-        )
-
-    filename = (
-        f"{uuid.uuid4().hex}.jpg"
-    )
-
-    save_path = (
-        Path(UPLOAD_DIR)
-        / filename
-    )
-
-    image.save(
-        save_path,
-        format="JPEG",
-        quality=88,
-        optimize=True,
-    )
-
-    return (
-        filename,
-        str(save_path),
-    )
+    return filename, str(save_path)
 
 
 # =========================================================
@@ -1257,7 +1183,7 @@ document.getElementById(
 
     button.textContent =
       file
-        ? "OCR 검사 중..."
+        ? "이미지 최적화 중..."
         : "전송 중...";
 
     try {
@@ -1894,27 +1820,20 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
-    uploaded_file = request.files.get(
-        "image"
-    )
+    uploaded_file = request.files.get("image")
 
     if uploaded_file is None:
         return jsonify(
             {
                 "ok": False,
-                "message": (
-                    "이미지가 선택되지 않았어."
-                ),
+                "message": "이미지가 선택되지 않았어.",
             }
         ), 400
 
     raw_bytes = uploaded_file.read()
 
     try:
-        filename, image_path = (
-            save_clean_image(raw_bytes)
-        )
-
+        filename, _ = save_clean_image(raw_bytes)
     except ValueError as error:
         return jsonify(
             {
@@ -1926,83 +1845,6 @@ def send_image(room_code: str):
     member = request.room_member
     user_token = request.user_token
     created_at = now_kst_iso()
-
-    try:
-        ocr_text = extract_text_from_image(
-            image_path
-        )
-
-    except Exception as error:
-        print(
-            "[ERROR] OCR 처리 실패: "
-            f"{error}"
-        )
-
-        try:
-            os.remove(image_path)
-        except OSError:
-            pass
-
-        return jsonify(
-            {
-                "ok": False,
-                "message": (
-                    "OCR 검사에 실패해서 "
-                    "이미지를 전송하지 않았어."
-                ),
-            }
-        ), 500
-
-    reasons = detect_contact_info(
-        ocr_text
-    )
-
-    if reasons:
-        try:
-            os.remove(image_path)
-        except OSError:
-            pass
-
-        with db_connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO blocked_messages(
-                    room_code,
-                    user_token,
-                    nickname,
-                    message_type,
-                    content,
-                    reasons,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    room_code,
-                    user_token,
-                    member["nickname"],
-                    "image",
-                    (
-                        ocr_text
-                        or "(OCR 텍스트 없음)"
-                    ),
-                    ", ".join(reasons),
-                    created_at,
-                ),
-            )
-
-        return jsonify(
-            {
-                "ok": False,
-                "blocked": True,
-                "message": (
-                    "이미지에서 연락처 또는 "
-                    "외부 연락 수단이 감지되어 "
-                    "전송하지 않았어."
-                ),
-                "reasons": reasons,
-            }
-        ), 400
 
     with db_connect() as connection:
         cursor = connection.execute(
@@ -2031,10 +1873,8 @@ def send_image(room_code: str):
         {
             "ok": True,
             "message_id": cursor.lastrowid,
-            "ocr_text": ocr_text,
         }
     )
-
 
 @app.route(
     "/uploads/<path:filename>",
@@ -2178,7 +2018,7 @@ def health():
         {
             "status": "healthy",
             "service": (
-                "contact-guard-chat-ocr"
+                "contact-guard-chat"
             ),
             "auth_mode": (
                 "room-token-header"

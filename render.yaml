@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 180 --workers 1
+    startCommand: gunicorn app:app --timeout 60 --workers 1 --threads 1
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -18,5 +18,3 @@ services:
         value: /var/data/contact_guard_chat.db
       - key: UPLOAD_DIR
         value: /var/data/contact_guard_uploads
-      - key: OCR_MODEL_DIR
-        value: /var/data/easyocr_models
