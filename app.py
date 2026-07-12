@@ -450,7 +450,7 @@ def get_ocr_reader():
             ["ko", "en"],
             gpu=False,
             model_storage_directory=OCR_MODEL_DIR,
-            download_enabled=False,
+            download_enabled=True,
         )
 
         print(
