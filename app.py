@@ -1068,20 +1068,33 @@ function showNotice(
   );
 }
 
+let unauthorizedCount = 0;
+
 function redirectToHomeOnUnauthorized(
   response
 ) {
-  if (response.status === 401) {
-    localStorage.removeItem(
-      tokenStorageKey
-    );
+  if (response.status !== 401) {
+    unauthorizedCount = 0;
+    return false;
+  }
 
-    window.location.href = "/";
+  unauthorizedCount += 1;
 
+  console.warn(
+    `채팅방 인증 확인 실패: ${unauthorizedCount}회`
+  );
+
+  if (unauthorizedCount < 3) {
     return true;
   }
 
-  return false;
+  localStorage.removeItem(
+    tokenStorageKey
+  );
+
+  window.location.href = "/";
+
+  return true;
 }
 
 function addMessage(message) {
@@ -1906,6 +1919,15 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
+ request_id = uuid.uuid4().hex
+
+    print(
+        f"[IMAGE] request started "
+        f"id={request_id} "
+        f"room={room_code}",
+        flush=True,
+    )
+
     uploaded_file = request.files.get("image")
 
     if uploaded_file is None:
@@ -1992,6 +2014,13 @@ def send_image(room_code: str):
                     flush=True,
                 )
 
+print(
+    f"[IMAGE] database insert "
+    f"id={request_id} "
+    f"filename={filename}",
+    flush=True,
+)
+
         with db_connect() as connection:
             connection.execute(
                 """
@@ -2030,6 +2059,13 @@ def send_image(room_code: str):
             }
         ), 400
 
+    print(
+        f"[IMAGE] database insert "
+        f"id={request_id} "
+        f"filename={filename}",
+        flush=True,
+    )
+
     with db_connect() as connection:
         cursor = connection.execute(
             """
@@ -2053,13 +2089,19 @@ def send_image(room_code: str):
             ),
         )
 
+    print(
+        f"[IMAGE] request finished "
+        f"id={request_id} "
+        f"message_id={cursor.lastrowid}",
+        flush=True,
+    )
+
     return jsonify(
         {
             "ok": True,
             "message_id": cursor.lastrowid,
         }
     )
-
 
 @app.route(
     "/uploads/<path:filename>",
