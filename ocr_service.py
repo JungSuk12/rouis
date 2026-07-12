@@ -1,4 +1,3 @@
-import traceback
 import gc
 import os
 import threading
@@ -23,7 +22,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 # OCR 설정
 # =========================================================
 
-# 일부러 메모리를 줄인 설정
+# 메모리 절감을 위한 OCR 입력 설정
 OCR_IMAGE_SIDE = 256
 OCR_JPEG_QUALITY = 70
 
@@ -42,6 +41,10 @@ _ocr_reader_lock = threading.Lock()
 _ocr_run_lock = threading.Lock()
 
 
+# =========================================================
+# PyTorch 저메모리 설정
+# =========================================================
+
 def configure_torch_for_low_memory() -> None:
     try:
         import torch
@@ -53,13 +56,17 @@ def configure_torch_for_low_memory() -> None:
         except RuntimeError:
             pass
 
-except Exception:
-    traceback.print_exc()
+    except Exception as error:
+        print(
+            "[OCR] torch low-memory setting skipped: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
 
-    # OCR이 실패해도 저장된 이미지는 삭제하지 않고 전송한다.
-    ocr_text = ""
-    reasons = []
 
+# =========================================================
+# EasyOCR Reader 지연 로딩
+# =========================================================
 
 def get_ocr_reader():
     global _ocr_reader
@@ -103,6 +110,10 @@ def get_ocr_reader():
 
     return _ocr_reader
 
+
+# =========================================================
+# OCR용 저해상도 임시 이미지 생성
+# =========================================================
 
 def create_ocr_image(
     source_image_path: str,
@@ -177,6 +188,10 @@ def create_ocr_image(
                 pass
 
 
+# =========================================================
+# 이미지 OCR 실행
+# =========================================================
+
 def extract_text_from_image(
     image_path: str,
 ) -> str:
@@ -235,6 +250,7 @@ def extract_text_from_image(
                     ).unlink(
                         missing_ok=True
                     )
+
                 except OSError as error:
                     print(
                         "[OCR] temporary image delete failed: "
@@ -244,6 +260,10 @@ def extract_text_from_image(
 
             gc.collect()
 
+
+# =========================================================
+# OCR Reader 로딩 상태
+# =========================================================
 
 def is_ocr_loaded() -> bool:
     return _ocr_reader is not None
