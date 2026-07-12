@@ -41,7 +41,7 @@ LOCAL_DB_PATH = "contact_guard_chat.db"
 LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 
 
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_BYTES = 5 * 512 * 512
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
