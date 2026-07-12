@@ -3,7 +3,7 @@ services:
     name: contact-guard-chat
     runtime: python
     plan: free
-    buildCommand: python -m pip install --no-cache-dir -r requirements.txt && python -c "import easyocr; print('EasyOCR installed:', easyocr.__version__)"
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --timeout 60 --workers 1 --threads 1
     healthCheckPath: /health
     autoDeploy: true
