@@ -1025,7 +1025,7 @@ const userToken =
 
 let lastMessageId = 0;
 let isLoadingMessages = false;
-let isSending = false;
+const renderedMessageIds = new Set();
 
 const messagesElement =
   document.getElementById("messages");
@@ -1068,36 +1068,29 @@ function showNotice(
   );
 }
 
-let unauthorizedCount = 0;
-
 function redirectToHomeOnUnauthorized(
   response
 ) {
-  if (response.status !== 401) {
-    unauthorizedCount = 0;
-    return false;
-  }
+  if (response.status === 401) {
+    localStorage.removeItem(
+      tokenStorageKey
+    );
 
-  unauthorizedCount += 1;
+    window.location.href = "/";
 
-  console.warn(
-    `채팅방 인증 확인 실패: ${unauthorizedCount}회`
-  );
-
-  if (unauthorizedCount < 3) {
     return true;
   }
 
-  localStorage.removeItem(
-    tokenStorageKey
-  );
-
-  window.location.href = "/";
-
-  return true;
+  return false;
 }
 
 function addMessage(message) {
+  if (renderedMessageIds.has(message.id)) {
+    return;
+  }
+
+  renderedMessageIds.add(message.id);
+
   const article =
     document.createElement("article");
 
@@ -1176,11 +1169,10 @@ async function loadMessages() {
     ).textContent = data.member_count;
 
     for (const message of data.messages) {
-      if (message.id <= lastMessageId) {
-        continue;
-      }
-
-      lastMessageId = message.id;
+      lastMessageId = Math.max(
+        lastMessageId,
+        message.id
+      );
 
       addMessage(message);
     }
@@ -1251,10 +1243,6 @@ document.getElementById(
   async event => {
     event.preventDefault();
 
-    if (isSending) {
-      return;
-    }
-
     const file =
       imageInputElement.files[0];
 
@@ -1269,13 +1257,8 @@ document.getElementById(
       return;
     }
 
-    isSending = true;
-
     const button =
-      event.submitter
-      || document.querySelector(
-        "#form button.primary"
-      );
+      event.submitter;
 
     button.disabled = true;
 
@@ -1324,7 +1307,6 @@ document.getElementById(
       );
 
     } finally {
-      isSending = false;
       button.disabled = false;
       button.textContent = "전송";
     }
@@ -1363,12 +1345,16 @@ document.getElementById(
   }
 );
 
-loadMessages();
+async function pollMessages() {
+  await loadMessages();
 
-setInterval(
-  loadMessages,
-  1200
-);
+  setTimeout(
+    pollMessages,
+    1200
+  );
+}
+
+pollMessages();
 </script>
 </body>
 </html>
@@ -1919,15 +1905,6 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
- request_id = uuid.uuid4().hex
-
-    print(
-        f"[IMAGE] request started "
-        f"id={request_id} "
-        f"room={room_code}",
-        flush=True,
-    )
-
     uploaded_file = request.files.get("image")
 
     if uploaded_file is None:
@@ -2014,13 +1991,6 @@ def send_image(room_code: str):
                     flush=True,
                 )
 
-print(
-    f"[IMAGE] database insert "
-    f"id={request_id} "
-    f"filename={filename}",
-    flush=True,
-)
-
         with db_connect() as connection:
             connection.execute(
                 """
@@ -2059,13 +2029,6 @@ print(
             }
         ), 400
 
-    print(
-        f"[IMAGE] database insert "
-        f"id={request_id} "
-        f"filename={filename}",
-        flush=True,
-    )
-
     with db_connect() as connection:
         cursor = connection.execute(
             """
@@ -2089,19 +2052,13 @@ print(
             ),
         )
 
-    print(
-        f"[IMAGE] request finished "
-        f"id={request_id} "
-        f"message_id={cursor.lastrowid}",
-        flush=True,
-    )
-
     return jsonify(
         {
             "ok": True,
             "message_id": cursor.lastrowid,
         }
     )
+
 
 @app.route(
     "/uploads/<path:filename>",
