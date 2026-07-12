@@ -1954,27 +1954,14 @@ def send_image(room_code: str):
 
     except Exception as error:
         print(
-            "[OCR] image inspection failed: "
+            "[OCR] image inspection skipped: "
             f"{type(error).__name__}: {error}",
             flush=True,
         )
 
-        if image_path:
-            try:
-                Path(image_path).unlink(
-                    missing_ok=True
-                )
-            except OSError:
-                pass
-
-        return jsonify(
-            {
-                "ok": False,
-                "message": (
-                    "이미지 검사 중 오류가 발생했어."
-                ),
-            }
-        ), 500
+        # OCR이 실패해도 저장된 이미지는 삭제하지 않고 전송한다.
+        ocr_text = ""
+        reasons = []
 
     member = request.room_member
     user_token = request.user_token
