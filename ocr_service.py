@@ -3,7 +3,7 @@ import os
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from PIL import Image, ImageEnhance, ImageOps
 
@@ -17,8 +17,6 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-
-# PyTorch가 불필요하게 CPU 스레드를 늘리는 것을 방지
 os.environ.setdefault("TORCH_NUM_THREADS", "1")
 
 
@@ -26,8 +24,6 @@ os.environ.setdefault("TORCH_NUM_THREADS", "1")
 # OCR 설정
 # =========================================================
 
-# 256은 작은 글자가 검출되지 않을 가능성이 매우 큼
-# Render 메모리를 고려해 우선 512로 사용
 OCR_IMAGE_SIDE = int(
     os.environ.get(
         "OCR_IMAGE_SIDE",
@@ -35,11 +31,10 @@ OCR_IMAGE_SIDE = int(
     )
 )
 
-# JPEG 대신 PNG를 사용하므로 실제 저장 품질에는 사용하지 않음
 OCR_CONTRAST = float(
     os.environ.get(
         "OCR_CONTRAST",
-        "1.25",
+        "1.20",
     )
 )
 
@@ -70,8 +65,8 @@ def configure_torch_for_low_memory() -> None:
 
         try:
             torch.set_num_interop_threads(1)
+
         except RuntimeError:
-            # 이미 PyTorch 작업이 시작된 뒤에는 변경할 수 있음
             pass
 
         print(
@@ -92,7 +87,9 @@ def configure_torch_for_low_memory() -> None:
 # =========================================================
 
 def resolve_ocr_model_directory() -> str:
-    preferred_path = Path(OCR_MODEL_DIR)
+    preferred_path = Path(
+        OCR_MODEL_DIR
+    )
 
     try:
         preferred_path.mkdir(
@@ -114,7 +111,15 @@ def resolve_ocr_model_directory() -> str:
             missing_ok=True
         )
 
-        return str(preferred_path)
+        print(
+            "[OCR] model directory ready: "
+            f"{preferred_path}",
+            flush=True,
+        )
+
+        return str(
+            preferred_path
+        )
 
     except Exception as error:
         fallback_path = Path(
@@ -139,7 +144,9 @@ def resolve_ocr_model_directory() -> str:
             flush=True,
         )
 
-        return str(fallback_path)
+        return str(
+            fallback_path
+        )
 
 
 # =========================================================
@@ -176,9 +183,6 @@ def get_ocr_reader():
             model_storage_directory=(
                 model_directory
             ),
-            user_network_directory=(
-                model_directory
-            ),
             download_enabled=True,
             detector=True,
             recognizer=True,
@@ -191,16 +195,16 @@ def get_ocr_reader():
             flush=True,
         )
 
-    return _ocr_reader
+        return _ocr_reader
 
 
 # =========================================================
-# OCR 이미지 리샘플링 방식 결정
+# OCR 이미지 축소 필터
 # =========================================================
 
 def get_resize_filter(
     original_size: tuple[int, int],
-) -> int:
+):
     width, height = original_size
 
     current_long_side = max(
@@ -208,7 +212,6 @@ def get_resize_filter(
         height,
     )
 
-    # 심하게 축소할 때는 LANCZOS가 글자 획을 더 잘 유지함
     if current_long_side > (
         OCR_IMAGE_SIDE * 2
     ):
@@ -228,36 +231,33 @@ def create_ocr_image(
         source_image_path
     )
 
-    unique_name = (
-        f"{source_path.stem}_ocr_"
-        f"{uuid.uuid4().hex}.png"
-    )
-
     ocr_path = (
         source_path.parent
-        / unique_name
+        / (
+            f"{source_path.stem}_ocr_"
+            f"{uuid.uuid4().hex}.png"
+        )
     )
 
     transposed_image = None
     rgb_image = None
-    resized_image = None
+    prepared_image = None
     enhanced_image = None
 
     try:
         with Image.open(
             source_image_path
         ) as source_image:
-            # 휴대폰 사진 EXIF 방향 보정
             transposed_image = (
                 ImageOps.exif_transpose(
                     source_image
                 )
             )
 
-            # EasyOCR 검출에는 흑백보다 RGB가 안전함
             rgb_image = (
-                transposed_image
-                .convert("RGB")
+                transposed_image.convert(
+                    "RGB"
+                )
             )
 
             original_width = (
@@ -271,50 +271,40 @@ def create_ocr_image(
             if max(
                 rgb_image.size
             ) > OCR_IMAGE_SIDE:
-                resize_filter = (
-                    get_resize_filter(
-                        rgb_image.size
-                    )
-                )
-
                 rgb_image.thumbnail(
                     (
                         OCR_IMAGE_SIDE,
                         OCR_IMAGE_SIDE,
                     ),
-                    resize_filter,
+                    get_resize_filter(
+                        rgb_image.size
+                    ),
                     reducing_gap=2.0,
                 )
 
-            # thumbnail 이후 원본 객체와 분리
-            resized_image = (
-                rgb_image.copy()
-            )
-
-            # 과도한 흑백화 대신 밝기 범위만 자동 보정
-            resized_image = (
+            prepared_image = (
                 ImageOps.autocontrast(
-                    resized_image,
+                    rgb_image,
                     cutoff=1,
                 )
             )
 
-            # 글자와 배경의 대비를 약간만 강화
             if OCR_CONTRAST != 1.0:
-                enhancer = (
+                contrast_enhancer = (
                     ImageEnhance.Contrast(
-                        resized_image
+                        prepared_image
                     )
                 )
 
                 enhanced_image = (
-                    enhancer.enhance(
+                    contrast_enhancer.enhance(
                         OCR_CONTRAST
                     )
                 )
+
             else:
                 enhanced_image = (
-                    resized_image.copy()
+                    prepared_image.copy()
                 )
 
             enhanced_image.save(
@@ -331,12 +321,13 @@ def create_ocr_image(
                 f"{original_height} "
                 f"ocr="
                 f"{enhanced_image.width}x"
-                f"{enhanced_image.height} "
-                f"path={ocr_path}",
+                f"{enhanced_image.height}",
                 flush=True,
             )
 
-        return str(ocr_path)
+        return str(
+            ocr_path
+        )
 
     finally:
         if enhanced_image is not None:
@@ -345,9 +336,9 @@ def create_ocr_image(
             except Exception:
                 pass
 
-        if resized_image is not None:
+        if prepared_image is not None:
             try:
-                resized_image.close()
+                prepared_image.close()
             except Exception:
                 pass
 
@@ -365,11 +356,11 @@ def create_ocr_image(
 
 
 # =========================================================
-# OCR 결과 텍스트 정리
+# OCR 결과 정리
 # =========================================================
 
 def normalize_ocr_results(
-    results,
+    results: Any,
 ) -> list[str]:
     texts: list[str] = []
 
@@ -379,14 +370,12 @@ def normalize_ocr_results(
     for item in results:
         text = ""
 
-        # detail=0인 경우 문자열
         if isinstance(
             item,
             str,
         ):
             text = item
 
-        # 혹시 detail 설정이 달라졌을 때도 처리
         elif (
             isinstance(
                 item,
@@ -474,42 +463,21 @@ def extract_text_from_image(
 
             results = reader.readtext(
                 ocr_image_path,
-
-                # 결과 문자열만 반환
                 detail=0,
-
-                # 연락처 문구는 줄 단위가 유리함
                 paragraph=False,
-
-                # 메모리와 속도가 가장 적게 드는 디코더
                 decoder="greedy",
                 beamWidth=1,
-
-                # CPU 메모리 절감
                 batch_size=1,
                 workers=0,
-
-                # 입력 이미지 크기와 동일하게 설정
                 canvas_size=OCR_IMAGE_SIDE,
                 mag_ratio=1.0,
-
-                # 너무 크게 잡으면 작은 숫자가 누락됨
                 min_size=5,
-
-                # 휴대폰 이미지의 회전 텍스트 보조
-                rotation_info=[90, 180, 270],
-
-                # 기본값보다 조금 느슨하게 잡아
-                # 작은 한글과 숫자 검출률을 확보
+                rotation_info=None,
                 text_threshold=0.5,
                 low_text=0.3,
                 link_threshold=0.3,
-
-                # 연락처처럼 짧은 숫자 문자열 보존
                 width_ths=0.7,
                 height_ths=0.7,
-
-                # 대비가 낮은 글자에 대해 재인식
                 contrast_ths=0.05,
                 adjust_contrast=0.7,
             )
