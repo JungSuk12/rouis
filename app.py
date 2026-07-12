@@ -447,11 +447,11 @@ def get_ocr_reader():
         import easyocr
 
         _ocr_reader = easyocr.Reader(
-            ["ko", "en"],
-            gpu=False,
-            model_storage_directory=OCR_MODEL_DIR,
-            download_enabled=True,
-        )
+    ["ko", "en"],
+    gpu=False,
+    model_storage_directory=OCR_MODEL_DIR,
+    download_enabled=False,
+)
 
         print(
             "[OCR] EasyOCR Reader ready",
