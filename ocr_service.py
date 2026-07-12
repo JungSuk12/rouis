@@ -168,12 +168,48 @@ def get_ocr_reader():
             flush=True,
         )
 
+        print(
+            "[OCR] torch configuration starting",
+            flush=True,
+        )
+
         configure_torch_for_low_memory()
+
+        print(
+            "[OCR] torch configuration finished",
+            flush=True,
+        )
+
+        print(
+            "[OCR] easyocr import starting",
+            flush=True,
+        )
 
         import easyocr
 
+        print(
+            "[OCR] easyocr import finished",
+            flush=True,
+        )
+
+        print(
+            "[OCR] model directory resolving",
+            flush=True,
+        )
+
         model_directory = (
             resolve_ocr_model_directory()
+        )
+
+        print(
+            "[OCR] model directory resolved "
+            f"path={model_directory}",
+            flush=True,
+        )
+
+        print(
+            "[OCR] Reader constructor starting",
+            flush=True,
         )
 
         _ocr_reader = easyocr.Reader(
@@ -190,13 +226,17 @@ def get_ocr_reader():
         )
 
         print(
+            "[OCR] Reader constructor finished",
+            flush=True,
+        )
+
+        print(
             "[OCR] EasyOCR Reader ready "
             f"model_dir={model_directory}",
             flush=True,
         )
 
         return _ocr_reader
-
 
 # =========================================================
 # OCR 이미지 축소 필터
