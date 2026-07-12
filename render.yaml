@@ -2,11 +2,11 @@ services:
   - type: web
     name: contact-guard-chat
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 1 --threads 4 --timeout 180
+    startCommand: gunicorn app:app --timeout 180 --workers 1
     healthCheckPath: /health
     autoDeploy: true
-
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
@@ -15,8 +15,8 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: CHAT_DB_PATH
-        value: contact_guard_chat.db
+        value: /var/data/contact_guard_chat.db
       - key: UPLOAD_DIR
-        value: contact_guard_uploads
+        value: /var/data/contact_guard_uploads
       - key: OCR_MODEL_DIR
-        value: easyocr_models
+        value: /var/data/easyocr_models
