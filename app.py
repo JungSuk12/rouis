@@ -1024,6 +1024,7 @@ const userToken =
   || initialToken;
 
 let lastMessageId = 0;
+let isLoadingMessages = false;
 
 const messagesElement =
   document.getElementById("messages");
@@ -1129,6 +1130,12 @@ function addMessage(message) {
 }
 
 async function loadMessages() {
+  if (isLoadingMessages) {
+    return;
+  }
+
+  isLoadingMessages = true;
+
   try {
     const response = await fetch(
       `/api/room/${roomCode}/messages?after=${lastMessageId}`,
@@ -1155,16 +1162,20 @@ async function loadMessages() {
     ).textContent = data.member_count;
 
     for (const message of data.messages) {
-      addMessage(message);
+      if (message.id <= lastMessageId) {
+        continue;
+      }
 
-      lastMessageId = Math.max(
-        lastMessageId,
-        message.id
-      );
+      lastMessageId = message.id;
+
+      addMessage(message);
     }
 
   } catch (error) {
     console.error(error);
+
+  } finally {
+    isLoadingMessages = false;
   }
 }
 
