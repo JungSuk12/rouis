@@ -3,8 +3,8 @@ services:
     name: contact-guard-chat
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --timeout 60 --workers 1 --threads 1
+    buildCommand: python -m pip install --upgrade pip setuptools wheel && python -m pip install --no-cache-dir -r requirements.txt && python -m pip show easyocr
+    startCommand: python -m gunicorn app:app --timeout 60 --workers 1 --threads 1
     healthCheckPath: /health
     autoDeploy: true
     envVars:
