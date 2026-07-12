@@ -1071,17 +1071,19 @@ function showNotice(
 function redirectToHomeOnUnauthorized(
   response
 ) {
-  if (response.status === 401) {
-    localStorage.removeItem(
-      tokenStorageKey
-    );
-
-    window.location.href = "/";
-
-    return true;
+  if (response.status !== 401) {
+    return false;
   }
 
-  return false;
+  console.warn(
+    "채팅방 인증 확인이 일시적으로 실패했어."
+  );
+
+  showNotice(
+    "서버 연결을 다시 확인하고 있어."
+  );
+
+  return true;
 }
 
 function addMessage(message) {
