@@ -1913,13 +1913,13 @@ def send_message(room_code: str):
     )
 
 
-@app.route(
-    "/api/room/<room_code>/image",
-    methods=["POST"],
-)
-@require_room_member_api
-def send_image(room_code: str):
- request_id = uuid.uuid4().hex
+    @app.route(
+        "/api/room/<room_code>/image",
+        methods=["POST"],
+    )
+    @require_room_member_api
+    def send_image(room_code: str):
+     request_id = uuid.uuid4().hex
 
     print(
         f"[IMAGE] request started "
