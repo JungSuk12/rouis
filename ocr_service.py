@@ -53,12 +53,12 @@ def configure_torch_for_low_memory() -> None:
         except RuntimeError:
             pass
 
-    except Exception as error:
-        print(
-            "[OCR] torch low-memory setting skipped: "
-            f"{type(error).__name__}: {error}",
-            flush=True,
-        )
+except Exception:
+    traceback.print_exc()
+
+    # OCR이 실패해도 저장된 이미지는 삭제하지 않고 전송한다.
+    ocr_text = ""
+    reasons = []
 
 
 def get_ocr_reader():
