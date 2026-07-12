@@ -1025,6 +1025,7 @@ const userToken =
 
 let lastMessageId = 0;
 let isLoadingMessages = false;
+let isSending = false;
 
 const messagesElement =
   document.getElementById("messages");
@@ -1237,6 +1238,10 @@ document.getElementById(
   async event => {
     event.preventDefault();
 
+    if (isSending) {
+      return;
+    }
+
     const file =
       imageInputElement.files[0];
 
@@ -1251,8 +1256,13 @@ document.getElementById(
       return;
     }
 
+    isSending = true;
+
     const button =
-      event.submitter;
+      event.submitter
+      || document.querySelector(
+        "#form button.primary"
+      );
 
     button.disabled = true;
 
@@ -1301,6 +1311,7 @@ document.getElementById(
       );
 
     } finally {
+      isSending = false;
       button.disabled = false;
       button.textContent = "전송";
     }
