@@ -183,7 +183,7 @@ def get_ocr_reader():
             model_storage_directory=(
                 model_directory
             ),
-            download_enabled=True,
+            download_enabled=False,
             detector=True,
             recognizer=True,
             verbose=True,
