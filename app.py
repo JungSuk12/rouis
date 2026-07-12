@@ -1955,7 +1955,7 @@ def send_image(room_code: str):
     import traceback
 
     except Exception:
-    traceback.print_exc()
+        traceback.print_exc()
 
         # OCR이 실패해도 저장된 이미지는 삭제하지 않고 전송한다.
         ocr_text = ""
