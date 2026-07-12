@@ -439,6 +439,11 @@ def get_ocr_reader():
     global _ocr_reader
 
     if _ocr_reader is None:
+        print(
+            "[OCR] EasyOCR Reader loading...",
+            flush=True,
+        )
+
         import easyocr
 
         _ocr_reader = easyocr.Reader(
@@ -448,6 +453,11 @@ def get_ocr_reader():
             download_enabled=True,
         )
 
+        print(
+            "[OCR] EasyOCR Reader ready",
+            flush=True,
+        )
+
     return _ocr_reader
 
 
@@ -455,6 +465,11 @@ def extract_text_from_image(
     image_path: str,
 ) -> str:
     reader = get_ocr_reader()
+
+    print(
+        f"[OCR] readtext started path={image_path}",
+        flush=True,
+    )
 
     results = reader.readtext(
         image_path,
@@ -466,6 +481,11 @@ def extract_text_from_image(
         workers=0,
         canvas_size=1280,
         mag_ratio=1.0,
+    )
+
+    print(
+        f"[OCR] readtext finished count={len(results)}",
+        flush=True,
     )
 
     return "\n".join(
@@ -1959,6 +1979,11 @@ def send_message(room_code: str):
 )
 @require_room_member_api
 def send_image(room_code: str):
+    print(
+        f"[IMAGE] upload route entered room={room_code}",
+        flush=True,
+    )
+
     uploaded_file = request.files.get(
         "image"
     )
@@ -1975,9 +2000,19 @@ def send_image(room_code: str):
 
     raw_bytes = uploaded_file.read()
 
+    print(
+        f"[IMAGE] received bytes={len(raw_bytes)}",
+        flush=True,
+    )
+
     try:
         filename, image_path = (
             save_clean_image(raw_bytes)
+        )
+
+        print(
+            f"[IMAGE] saved path={image_path}",
+            flush=True,
         )
 
     except ValueError as error:
@@ -1997,8 +2032,18 @@ def send_image(room_code: str):
     created_at = now_kst_iso()
 
     try:
+        print(
+            f"[OCR] inspection started room={room_code}",
+            flush=True,
+        )
+
         ocr_text = extract_text_from_image(
             image_path
+        )
+
+        print(
+            f"[OCR] inspection finished room={room_code}",
+            flush=True,
         )
 
     except Exception as error:
@@ -2095,6 +2140,11 @@ def send_image(room_code: str):
                 created_at,
             ),
         )
+
+    print(
+        f"[IMAGE] message inserted id={cursor.lastrowid}",
+        flush=True,
+    )
 
     return jsonify(
         {
