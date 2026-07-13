@@ -338,6 +338,128 @@ def now_kst_iso() -> str:
     )
 
 
+def delete_room_completely(
+    room_code: str,
+) -> bool:
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    image_filenames: List[str] = []
+
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT 1
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+        if room is None:
+            return False
+
+        image_rows = connection.execute(
+            """
+            SELECT content
+            FROM messages
+            WHERE room_code = ?
+              AND message_type = 'image'
+            """,
+            (normalized_room_code,),
+        ).fetchall()
+
+        image_filenames = [
+            str(row["content"] or "").strip()
+            for row in image_rows
+            if str(row["content"] or "").strip()
+        ]
+
+        connection.execute(
+            "DELETE FROM room_choices WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+        connection.execute(
+            "DELETE FROM active_connections WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+        connection.execute(
+            "DELETE FROM blocked_messages WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+        connection.execute(
+            "DELETE FROM messages WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+        connection.execute(
+            "DELETE FROM members WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+        connection.execute(
+            "DELETE FROM rooms WHERE room_code = ?",
+            (normalized_room_code,),
+        )
+
+    upload_root = Path(UPLOAD_DIR).resolve()
+
+    for filename in image_filenames:
+        try:
+            image_path = (
+                upload_root / Path(filename).name
+            ).resolve()
+
+            if image_path.parent == upload_root:
+                image_path.unlink(
+                    missing_ok=True
+                )
+
+        except OSError as error:
+            print(
+                "[ROOM DELETE] image delete failed: "
+                f"{filename}: {error}",
+                flush=True,
+            )
+
+    return True
+
+
+def cleanup_expired_normal_rooms() -> None:
+    with db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                room_code,
+                expires_at
+            FROM rooms
+            WHERE is_admin_room = 0
+              AND expires_at IS NOT NULL
+              AND expires_at != ''
+            """
+        ).fetchall()
+
+    now_value = datetime.now(KST)
+
+    for row in rows:
+        try:
+            expires_datetime = datetime.fromisoformat(
+                row["expires_at"]
+            )
+
+        except (TypeError, ValueError):
+            continue
+
+        if now_value >= expires_datetime:
+            delete_room_completely(
+                row["room_code"]
+            )
+
+
 def get_room_time_state(
     room_code: str,
 ) -> Tuple[bool, str]:
@@ -380,6 +502,11 @@ def get_room_time_state(
         datetime.now(KST)
         >= expires_datetime
     )
+
+    if is_expired:
+        delete_room_completely(
+            room_code
+        )
 
     return is_expired, expires_at
 
@@ -2945,6 +3072,17 @@ ADMIN_HTML = """
                   <a href="{{ url_for('admin_open_room', room_code=room.room_code) }}">
                     관리자 입장
                   </a>
+
+                  <form
+                    method="post"
+                    action="{{ url_for('admin_delete_room', room_code=room.room_code) }}"
+                    style="display:inline; margin-left:8px;"
+                    onsubmit="return confirm('관리자 방과 모든 기록을 완전히 삭제할까?');"
+                  >
+                    <button type="submit">
+                      완전 삭제
+                    </button>
+                  </form>
                 {% else %}
                   -
                 {% endif %}
@@ -3007,6 +3145,8 @@ ADMIN_HTML = """
 
 @app.route("/")
 def home():
+    cleanup_expired_normal_rooms()
+
     return render_template_string(
         HOME_HTML
     )
@@ -4213,11 +4353,46 @@ def admin_open_room(room_code: str):
 
 
 @app.route(
+    "/admin/room/<room_code>/delete",
+    methods=["POST"],
+)
+@admin_required
+def admin_delete_room(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT is_admin_room
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    if (
+        room is not None
+        and int(room["is_admin_room"] or 0) == 1
+    ):
+        delete_room_completely(
+            normalized_room_code
+        )
+
+    return redirect(
+        url_for("admin_dashboard")
+    )
+
+
+@app.route(
     "/admin",
     methods=["GET"],
 )
 @admin_required
 def admin_dashboard():
+    cleanup_expired_normal_rooms()
+
     with db_connect() as connection:
         blocked = connection.execute(
             """
