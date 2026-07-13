@@ -1774,7 +1774,11 @@ CHAT_HTML = """
         placeholder="메시지를 입력해. 연락처·링크·SNS ID는 차단돼."
       ></textarea>
 
-      <button class="primary">
+      <button
+        id="send-button"
+        class="primary"
+        type="submit"
+      >
         전송
       </button>
     </form>
@@ -1837,6 +1841,12 @@ const imageInputElement =
 
 const fileNameElement =
   document.getElementById("file-name");
+
+const formElement =
+  document.getElementById("form");
+
+const sendButtonElement =
+  document.getElementById("send-button");
 
 const noticeElement =
   document.getElementById("notice");
@@ -2363,9 +2373,7 @@ imageInputElement.addEventListener(
   }
 );
 
-document.getElementById(
-  "form"
-).addEventListener(
+formElement.addEventListener(
   "submit",
   async event => {
     event.preventDefault();
@@ -2385,7 +2393,8 @@ document.getElementById(
     }
 
     const button =
-      event.submitter;
+      event.submitter
+      || sendButtonElement;
 
     button.disabled = true;
 
@@ -2426,6 +2435,12 @@ document.getElementById(
 
       await loadMessages();
 
+      inputElement.focus(
+        {
+          preventScroll: true
+        }
+      );
+
     } catch (error) {
       console.error(error);
 
@@ -2436,6 +2451,35 @@ document.getElementById(
     } finally {
       button.disabled = false;
       button.textContent = "전송";
+
+      if (!roomExpired) {
+        setTimeout(
+          () => {
+            inputElement.focus(
+              {
+                preventScroll: true
+              }
+            );
+          },
+          0
+        );
+      }
+    }
+  }
+);
+
+sendButtonElement.addEventListener(
+  "pointerdown",
+  event => {
+    if (
+      event.pointerType === "touch"
+      && document.activeElement === inputElement
+    ) {
+      event.preventDefault();
+
+      formElement.requestSubmit(
+        sendButtonElement
+      );
     }
   }
 );
@@ -2449,9 +2493,9 @@ inputElement.addEventListener(
     ) {
       event.preventDefault();
 
-      document
-        .getElementById("form")
-        .requestSubmit();
+      formElement.requestSubmit(
+        sendButtonElement
+      );
     }
   }
 );
