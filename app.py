@@ -1157,6 +1157,26 @@ HOME_HTML = """
       </div>
     {% endif %}
 
+    <section
+      id="reconnect-card"
+      class="card hidden"
+    >
+      <h2>최근 채팅방 재접속</h2>
+
+      <p class="muted">
+        실수로 나갔거나 새로고침한 경우,
+        기존 인증으로 다시 들어갈 수 있어.
+      </p>
+
+      <button
+        id="reconnect-button"
+        class="primary full"
+        type="button"
+      >
+        다시 들어가기
+      </button>
+    </section>
+
     <section class="grid">
       <form
         class="card"
@@ -1207,6 +1227,53 @@ HOME_HTML = """
       </form>
     </section>
   </main>
+
+<script>
+const lastRoomCode =
+  localStorage.getItem(
+    "contact_guard_last_room_code"
+  );
+
+const lastRoomToken =
+  lastRoomCode
+    ? localStorage.getItem(
+        `contact_guard_token_${lastRoomCode}`
+      )
+    : "";
+
+const reconnectCard =
+  document.getElementById(
+    "reconnect-card"
+  );
+
+const reconnectButton =
+  document.getElementById(
+    "reconnect-button"
+  );
+
+if (
+  lastRoomCode
+  && lastRoomToken
+) {
+  reconnectCard.classList.remove(
+    "hidden"
+  );
+
+  reconnectButton.textContent =
+    `${lastRoomCode} 방 다시 들어가기`;
+
+  reconnectButton.addEventListener(
+    "click",
+    () => {
+      window.location.href =
+        `/room/${lastRoomCode}`
+        + `?token=${encodeURIComponent(
+          lastRoomToken
+        )}`;
+    }
+  );
+}
+</script>
 </body>
 </html>
 """
@@ -1253,7 +1320,10 @@ CHAT_HTML = """
         </p>
       </div>
 
-      <a href="{{ url_for('home') }}">
+      <a
+        id="leave-room"
+        href="{{ url_for('home') }}"
+      >
         나가기
       </a>
     </header>
@@ -1308,6 +1378,11 @@ const tokenStorageKey = `contact_guard_token_${roomCode}`;
 localStorage.setItem(
   tokenStorageKey,
   initialToken
+);
+
+localStorage.setItem(
+  "contact_guard_last_room_code",
+  roomCode
 );
 
 const userToken =
@@ -1367,6 +1442,14 @@ function disconnectExpiredRoom() {
   }
 
   roomExpired = true;
+
+  localStorage.removeItem(
+    "contact_guard_last_room_code"
+  );
+
+  localStorage.removeItem(
+    tokenStorageKey
+  );
 
   showNotice(
     "채팅 시간이 종료되어 연결이 끊겼어."
@@ -1701,6 +1784,24 @@ inputElement.addEventListener(
       document
         .getElementById("form")
         .requestSubmit();
+    }
+  }
+);
+
+document.getElementById(
+  "leave-room"
+).addEventListener(
+  "click",
+  event => {
+    const confirmed = window.confirm(
+      "채팅방에서 나갈까? "
+      + "10분이 끝나기 전에는 "
+      + "메인 화면의 재접속 버튼으로 "
+      + "다시 들어올 수 있어."
+    );
+
+    if (!confirmed) {
+      event.preventDefault();
     }
   }
 );
