@@ -1488,28 +1488,74 @@ const reconnectButton =
     "reconnect-button"
   );
 
-if (
-  lastRoomCode
-  && lastRoomToken
-) {
-  reconnectCard.classList.remove(
-    "hidden"
-  );
+async function initializeReconnectCard() {
+  if (
+    !lastRoomCode
+    || !lastRoomToken
+  ) {
+    return;
+  }
 
-  reconnectButton.textContent =
-    `${lastRoomCode} 방 다시 들어가기`;
+  try {
+    const response = await fetch(
+      `/api/room/${lastRoomCode}/reconnect-status`,
+      {
+        cache: "no-store",
+        headers: {
+          "X-User-Token": lastRoomToken
+        }
+      }
+    );
 
-  reconnectButton.addEventListener(
-    "click",
-    () => {
-      window.location.href =
-        `/room/${lastRoomCode}`
-        + `?token=${encodeURIComponent(
-          lastRoomToken
-        )}`;
+    const data = await response.json();
+
+    if (
+      !response.ok
+      || !data.can_reconnect
+    ) {
+      localStorage.removeItem(
+        "contact_guard_last_room_code"
+      );
+
+      localStorage.removeItem(
+        `contact_guard_token_${lastRoomCode}`
+      );
+
+      reconnectCard.classList.add(
+        "hidden"
+      );
+
+      return;
     }
-  );
+
+    reconnectCard.classList.remove(
+      "hidden"
+    );
+
+    reconnectButton.textContent =
+      `${lastRoomCode} 방 다시 들어가기`;
+
+    reconnectButton.addEventListener(
+      "click",
+      () => {
+        window.location.href =
+          `/room/${lastRoomCode}`
+          + `?token=${encodeURIComponent(
+            lastRoomToken
+          )}`;
+      }
+    );
+
+  } catch (error) {
+    console.error(error);
+
+    reconnectCard.classList.add(
+      "hidden"
+    );
+  }
 }
+
+initializeReconnectCard();
 </script>
 </body>
 </html>
@@ -2775,6 +2821,59 @@ def chat_room(room_code: str):
         room_code=normalized_room_code,
         nickname=member["nickname"],
         user_token=user_token,
+    )
+
+
+# =========================================================
+# 재접속 상태 확인 API
+# =========================================================
+
+@app.route(
+    "/api/room/<room_code>/reconnect-status",
+    methods=["GET"],
+)
+def reconnect_status(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    user_token = get_request_user_token()
+
+    member = get_room_member(
+        normalized_room_code,
+        user_token,
+    )
+
+    if member is None:
+        return jsonify(
+            {
+                "ok": True,
+                "can_reconnect": False,
+            }
+        )
+
+    is_expired, expires_at = (
+        get_room_time_state(
+            normalized_room_code
+        )
+    )
+
+    if is_expired:
+        return jsonify(
+            {
+                "ok": True,
+                "can_reconnect": False,
+                "expired": True,
+                "expires_at": expires_at,
+            }
+        )
+
+    return jsonify(
+        {
+            "ok": True,
+            "can_reconnect": True,
+            "expires_at": expires_at,
+        }
     )
 
 
