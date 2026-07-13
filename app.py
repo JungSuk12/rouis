@@ -346,6 +346,7 @@ SNS_ID_PATTERN = re.compile(
 NUMERIC_OBFUSCATION_REPLACEMENTS: Dict[str, str] = {
     "o": "0",
     "ｏ": "0",
+    "ㅇ": "0",
     "l": "1",
     "i": "1",
     "|": "1",
@@ -362,34 +363,60 @@ NUMERIC_OBFUSCATION_REPLACEMENTS: Dict[str, str] = {
 }
 
 
-def count_numeric_obfuscation_items(
+def has_consecutive_numeric_obfuscation(
     text: str,
-) -> int:
+    minimum_items: int = 3,
+) -> bool:
     value = text.casefold()
 
-    numeric_items = (
-        list(KOREAN_DIGIT_WORDS.keys())
-        + list(
-            NUMERIC_OBFUSCATION_REPLACEMENTS.keys()
-        )
-        + list("0123456789")
+    numeric_items = sorted(
+        set(
+            list(KOREAN_DIGIT_WORDS.keys())
+            + list(
+                NUMERIC_OBFUSCATION_REPLACEMENTS.keys()
+            )
+            + list("0123456789")
+        ),
+        key=len,
+        reverse=True,
     )
 
-    pattern = re.compile(
+    numeric_pattern = re.compile(
         "|".join(
             re.escape(item)
-            for item in sorted(
-                set(numeric_items),
-                key=len,
-                reverse=True,
-            )
+            for item in numeric_items
         ),
         re.IGNORECASE,
     )
 
-    return len(
-        pattern.findall(value)
+    separator_pattern = re.compile(
+        r"^[\s.·,，\-_/\\()（）\[\]{}:：]*$"
     )
+
+    consecutive_count = 0
+    previous_end = None
+
+    for match in numeric_pattern.finditer(value):
+        if previous_end is None:
+            consecutive_count = 1
+
+        else:
+            gap = value[
+                previous_end:match.start()
+            ]
+
+            if separator_pattern.fullmatch(gap):
+                consecutive_count += 1
+
+            else:
+                consecutive_count = 1
+
+        if consecutive_count >= minimum_items:
+            return True
+
+        previous_end = match.end()
+
+    return False
 
 
 def normalize_for_contact_detection(
@@ -437,9 +464,10 @@ def detect_contact_info(
 
     lowered = text.casefold()
 
-    numeric_item_count = (
-        count_numeric_obfuscation_items(
-            text
+    has_numeric_obfuscation = (
+        has_consecutive_numeric_obfuscation(
+            text,
+            minimum_items=3,
         )
     )
 
@@ -460,10 +488,10 @@ def detect_contact_info(
         )
 
     # 숫자·한글 숫자·영문 숫자·우회 문자가
-    # 문장 안에 총 5개 이상 있으면 전송 차단
-    if numeric_item_count >= 5:
+    # 연속으로 3개 이상 이어지면 전송 차단
+    if has_numeric_obfuscation:
         reasons.append(
-            "우회 숫자 표현"
+            "연속 우회 숫자 표현"
         )
 
     if URL_PATTERN.search(text):
