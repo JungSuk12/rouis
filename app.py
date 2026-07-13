@@ -2714,11 +2714,6 @@ function releaseConnection() {
   );
 }
 
-window.addEventListener(
-  "pagehide",
-  releaseConnection
-);
-
 document.getElementById(
   "leave-room"
 ).addEventListener(
@@ -2733,7 +2728,10 @@ document.getElementById(
 
     if (!confirmed) {
       event.preventDefault();
+      return;
     }
+
+    releaseConnection();
   }
 );
 
