@@ -43,6 +43,9 @@ app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 KST = timezone(timedelta(hours=9))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
 
+# 두 명이 모두 입장한 시점부터 유지되는 채팅 시간
+ROOM_SESSION_MINUTES = 10
+
 PREFERRED_DB_PATH = os.environ.get(
     "CHAT_DB_PATH",
     "/var/data/contact_guard_chat.db",
@@ -57,15 +60,19 @@ LOCAL_DB_PATH = "contact_guard_chat.db"
 LOCAL_UPLOAD_DIR = "contact_guard_uploads"
 
 
-MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# 원본 업로드 최대 허용 용량
+# 너무 큰 파일로 인한 메모리 문제만 방지
+MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024
+
+# 리사이즈·압축 후 최종 저장 파일 최대 용량
+MAX_OUTPUT_IMAGE_BYTES = 2 * 1024 * 1024
 
 # 상대방에게 실제 표시하고 저장할 이미지 크기
 MAX_IMAGE_SIDE = 1280
 
-# EasyOCR에만 전달할 임시 이미지 크기
-
 MAX_IMAGE_PIXELS = 20_000_000
 JPEG_QUALITY = 82
+MIN_JPEG_QUALITY = 50
 
 ALLOWED_IMAGE_FORMATS = {
     "JPEG",
@@ -169,7 +176,9 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS rooms (
                 room_code TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                expires_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS members (
@@ -207,6 +216,30 @@ def init_db() -> None:
         # 기존 DB 컬럼이 없어도 자동 보정
         if not column_exists(
             connection,
+            "rooms",
+            "started_at",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE rooms
+                ADD COLUMN started_at TEXT
+                """
+            )
+
+        if not column_exists(
+            connection,
+            "rooms",
+            "expires_at",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE rooms
+                ADD COLUMN expires_at TEXT
+                """
+            )
+
+        if not column_exists(
+            connection,
             "messages",
             "message_type",
         ):
@@ -239,6 +272,108 @@ def now_kst_iso() -> str:
     return datetime.now(KST).isoformat(
         timespec="seconds"
     )
+
+
+def get_room_time_state(
+    room_code: str,
+) -> Tuple[bool, str]:
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT
+                started_at,
+                expires_at
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (room_code,),
+        ).fetchone()
+
+    if room is None:
+        return True, ""
+
+    expires_at = (
+        room["expires_at"]
+        or ""
+    )
+
+    if not expires_at:
+        return False, ""
+
+    try:
+        expires_datetime = datetime.fromisoformat(
+            expires_at
+        )
+
+    except ValueError:
+        return False, ""
+
+    is_expired = (
+        datetime.now(KST)
+        >= expires_datetime
+    )
+
+    return is_expired, expires_at
+
+
+def start_room_session_if_ready(
+    room_code: str,
+) -> str:
+    if room_member_count(room_code) < 2:
+        return ""
+
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT
+                started_at,
+                expires_at
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (room_code,),
+        ).fetchone()
+
+        if room is None:
+            return ""
+
+        if room["expires_at"]:
+            return str(
+                room["expires_at"]
+            )
+
+        started_datetime = datetime.now(KST)
+        expires_datetime = (
+            started_datetime
+            + timedelta(
+                minutes=ROOM_SESSION_MINUTES
+            )
+        )
+
+        started_at = started_datetime.isoformat(
+            timespec="seconds"
+        )
+        expires_at = expires_datetime.isoformat(
+            timespec="seconds"
+        )
+
+        connection.execute(
+            """
+            UPDATE rooms
+            SET
+                started_at = ?,
+                expires_at = ?
+            WHERE room_code = ?
+              AND expires_at IS NULL
+            """,
+            (
+                started_at,
+                expires_at,
+                room_code,
+            ),
+        )
+
+    return expires_at
 
 
 # =========================================================
@@ -535,17 +670,23 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
     if not raw_bytes:
         raise ValueError("이미지 내용이 비어 있어.")
 
-    if len(raw_bytes) > MAX_IMAGE_BYTES:
-        max_mb = MAX_IMAGE_BYTES / (1024 * 1024)
+    if len(raw_bytes) > MAX_SOURCE_IMAGE_BYTES:
+        max_mb = (
+            MAX_SOURCE_IMAGE_BYTES
+            / (1024 * 1024)
+        )
 
         raise ValueError(
-            f"이미지는 최대 {max_mb:g}MB까지 가능해."
+            f"원본 이미지는 최대 {max_mb:g}MB까지 가능해."
         )
 
     image = None
+    output_buffer = None
 
     try:
-        with Image.open(io.BytesIO(raw_bytes)) as source_image:
+        with Image.open(
+            io.BytesIO(raw_bytes)
+        ) as source_image:
             if source_image.format not in ALLOWED_IMAGE_FORMATS:
                 raise ValueError(
                     "JPG, PNG, WEBP 이미지만 가능해."
@@ -573,17 +714,56 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
                     Image.Resampling.LANCZOS,
                 )
 
+            quality = JPEG_QUALITY
+            encoded_bytes = b""
+
+            while quality >= MIN_JPEG_QUALITY:
+                if output_buffer is not None:
+                    output_buffer.close()
+
+                output_buffer = io.BytesIO()
+
+                image.save(
+                    output_buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=False,
+                    progressive=False,
+                )
+
+                encoded_bytes = (
+                    output_buffer.getvalue()
+                )
+
+                if (
+                    len(encoded_bytes)
+                    <= MAX_OUTPUT_IMAGE_BYTES
+                ):
+                    break
+
+                quality -= 5
+
+            if (
+                not encoded_bytes
+                or len(encoded_bytes)
+                > MAX_OUTPUT_IMAGE_BYTES
+            ):
+                max_mb = (
+                    MAX_OUTPUT_IMAGE_BYTES
+                    / (1024 * 1024)
+                )
+
+                raise ValueError(
+                    "이미지를 줄였지만 "
+                    f"{max_mb:g}MB 이하로 "
+                    "압축할 수 없어."
+                )
+
             filename = f"{uuid.uuid4().hex}.jpg"
             save_path = Path(UPLOAD_DIR) / filename
 
-            image.save(
-                save_path,
-                format="JPEG",
-                quality=JPEG_QUALITY,
-
-                # 메모리 절약 우선
-                optimize=False,
-                progressive=False,
+            save_path.write_bytes(
+                encoded_bytes
             )
 
     except ValueError:
@@ -600,6 +780,9 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
         ) from error
 
     finally:
+        if output_buffer is not None:
+            output_buffer.close()
+
         if image is not None:
             image.close()
 
@@ -725,6 +908,25 @@ def require_room_member_api(view):
                     ),
                 }
             ), 401
+
+        is_expired, expires_at = (
+            get_room_time_state(
+                normalized_room_code
+            )
+        )
+
+        if is_expired:
+            return jsonify(
+                {
+                    "ok": False,
+                    "expired": True,
+                    "message": (
+                        "채팅 시간이 종료되어 "
+                        "연결이 끊겼어."
+                    ),
+                    "expires_at": expires_at,
+                }
+            ), 410
 
         request.room_member = member
         request.user_token = user_token
@@ -1045,6 +1247,9 @@ CHAT_HTML = """
           {{ nickname }}
           ·
           <span id="member-count">1</span>/2명
+          ·
+          남은 시간
+          <strong id="room-timer">10:00</strong>
         </p>
       </div>
 
@@ -1111,6 +1316,8 @@ const userToken =
 
 let lastMessageId = 0;
 let isLoadingMessages = false;
+let roomExpiresAt = "";
+let roomExpired = false;
 const renderedMessageIds = new Set();
 
 const messagesElement =
@@ -1154,9 +1361,85 @@ function showNotice(
   );
 }
 
+function disconnectExpiredRoom() {
+  if (roomExpired) {
+    return;
+  }
+
+  roomExpired = true;
+
+  showNotice(
+    "채팅 시간이 종료되어 연결이 끊겼어."
+  );
+
+  inputElement.disabled = true;
+  imageInputElement.disabled = true;
+
+  const submitButton =
+    document.querySelector(
+      "#form button[type='submit'], #form button"
+    );
+
+  if (submitButton) {
+    submitButton.disabled = true;
+  }
+
+  setTimeout(
+    () => {
+      window.location.href = "/";
+    },
+    1500
+  );
+}
+
+function updateRoomTimer() {
+  const timerElement =
+    document.getElementById("room-timer");
+
+  if (!roomExpiresAt) {
+    timerElement.textContent = "10:00";
+    return;
+  }
+
+  const expiresAtMs =
+    new Date(roomExpiresAt).getTime();
+
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil(
+      (expiresAtMs - Date.now()) / 1000
+    )
+  );
+
+  const minutes = Math.floor(
+    remainingSeconds / 60
+  );
+
+  const seconds =
+    remainingSeconds % 60;
+
+  timerElement.textContent =
+    `${String(minutes).padStart(2, "0")}:`
+    + `${String(seconds).padStart(2, "0")}`;
+
+  if (remainingSeconds <= 0) {
+    disconnectExpiredRoom();
+  }
+}
+
+setInterval(
+  updateRoomTimer,
+  250
+);
+
 function redirectToHomeOnUnauthorized(
   response
 ) {
+  if (response.status === 410) {
+    disconnectExpiredRoom();
+    return true;
+  }
+
   if (response.status !== 401) {
     return false;
   }
@@ -1255,6 +1538,11 @@ async function loadMessages() {
     document.getElementById(
       "member-count"
     ).textContent = data.member_count;
+
+    roomExpiresAt =
+      data.expires_at || "";
+
+    updateRoomTimer();
 
     for (const message of data.messages) {
       lastMessageId = Math.max(
@@ -1742,6 +2030,10 @@ def join_room():
             ),
         )
 
+    start_room_session_if_ready(
+        room_code
+    )
+
     return redirect(
         url_for(
             "chat_room",
@@ -1771,6 +2063,15 @@ def chat_room(room_code: str):
     )
 
     if member is None:
+        return redirect(
+            url_for("home")
+        )
+
+    is_expired, _ = get_room_time_state(
+        normalized_room_code
+    )
+
+    if is_expired:
         return redirect(
             url_for("home")
         )
@@ -1860,12 +2161,32 @@ def get_messages(room_code: str):
             }
         )
 
+    is_expired, expires_at = (
+        get_room_time_state(
+            room_code
+        )
+    )
+
+    if is_expired:
+        return jsonify(
+            {
+                "ok": False,
+                "expired": True,
+                "message": (
+                    "채팅 시간이 종료되어 "
+                    "연결이 끊겼어."
+                ),
+                "expires_at": expires_at,
+            }
+        ), 410
+
     return jsonify(
         {
             "messages": messages,
             "member_count": room_member_count(
                 room_code
             ),
+            "expires_at": expires_at,
         }
     )
 
