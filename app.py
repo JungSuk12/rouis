@@ -192,6 +192,7 @@ def init_db() -> None:
                 room_code TEXT NOT NULL,
                 user_token TEXT NOT NULL,
                 nickname TEXT NOT NULL,
+                kakao_nickname TEXT NOT NULL DEFAULT '',
                 joined_at TEXT NOT NULL,
                 UNIQUE(room_code, user_token)
             );
@@ -224,10 +225,31 @@ def init_db() -> None:
                 reasons TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS room_choices (
+                room_code TEXT NOT NULL,
+                user_token TEXT NOT NULL,
+                choice TEXT NOT NULL,
+                selected_at TEXT NOT NULL,
+                PRIMARY KEY(room_code, user_token)
+            );
             """
         )
 
         # 기존 DB 컬럼이 없어도 자동 보정
+        if not column_exists(
+            connection,
+            "members",
+            "kakao_nickname",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE members
+                ADD COLUMN kakao_nickname TEXT
+                NOT NULL DEFAULT ''
+                """
+            )
+
         if not column_exists(
             connection,
             "rooms",
@@ -1384,11 +1406,19 @@ HOME_HTML = """
       >
         <h2>새 방 만들기</h2>
 
-        <label>닉네임</label>
+        <label>채팅에서 사용할 닉네임</label>
 
         <input
           name="nickname"
           maxlength="20"
+          required
+        >
+
+        <label>본인 카카오톡 닉네임</label>
+
+        <input
+          name="kakao_nickname"
+          maxlength="30"
           required
         >
 
@@ -1412,11 +1442,19 @@ HOME_HTML = """
           required
         >
 
-        <label>닉네임</label>
+        <label>채팅에서 사용할 닉네임</label>
 
         <input
           name="nickname"
           maxlength="20"
+          required
+        >
+
+        <label>본인 카카오톡 닉네임</label>
+
+        <input
+          name="kakao_nickname"
+          maxlength="30"
           required
         >
 
@@ -1537,6 +1575,45 @@ CHAT_HTML = """
       class="alert hidden"
     ></div>
 
+    <section
+      id="choice-card"
+      class="card"
+    >
+      <h2>상대가 마음에 드나요?</h2>
+
+      <p
+        id="choice-status"
+        class="muted"
+      >
+        선택 결과는 서로 모두 선택한 뒤에만 안내돼.
+      </p>
+
+      <div
+        id="matched-kakao-box"
+        class="alert success hidden"
+      >
+        상대 카카오톡 닉네임:
+        <strong id="matched-kakao-nickname"></strong>
+      </div>
+
+      <div class="grid">
+        <button
+          id="choice-like"
+          class="primary"
+          type="button"
+        >
+          마음에 들어요
+        </button>
+
+        <button
+          id="choice-pass"
+          type="button"
+        >
+          아닌 것 같아요
+        </button>
+      </div>
+    </section>
+
     <p
       id="file-name"
       class="file-name"
@@ -1630,12 +1707,102 @@ const fileNameElement =
 const noticeElement =
   document.getElementById("notice");
 
+const choiceStatusElement =
+  document.getElementById(
+    "choice-status"
+  );
+
+const choiceLikeButton =
+  document.getElementById(
+    "choice-like"
+  );
+
+const choicePassButton =
+  document.getElementById(
+    "choice-pass"
+  );
+
+const matchedKakaoBox =
+  document.getElementById(
+    "matched-kakao-box"
+  );
+
+const matchedKakaoNickname =
+  document.getElementById(
+    "matched-kakao-nickname"
+  );
+
 function authenticatedHeaders(extra = {}) {
   return {
     "X-User-Token": userToken,
     "X-Connection-ID": connectionId,
     ...extra
   };
+}
+
+function setChoiceButtonsDisabled(
+  disabled
+) {
+  choiceLikeButton.disabled = disabled;
+  choicePassButton.disabled = disabled;
+}
+
+function applyChoiceState(
+  state
+) {
+  const myChoice =
+    state.my_choice || "";
+
+  const bothSelected =
+    Boolean(state.both_selected);
+
+  const matched =
+    Boolean(state.matched);
+
+  if (myChoice === "like") {
+    choiceStatusElement.textContent =
+      "마음에 들어요를 선택했어. "
+      + "상대의 선택을 기다리는 중이야.";
+
+    setChoiceButtonsDisabled(true);
+  }
+
+  if (myChoice === "pass") {
+    choiceStatusElement.textContent =
+      "선택이 완료됐어.";
+
+    setChoiceButtonsDisabled(true);
+  }
+
+  if (bothSelected) {
+    if (matched) {
+      choiceStatusElement.textContent =
+        "서로 마음에 들었어요.";
+
+      choiceStatusElement.className =
+        "success";
+
+      const partnerKakaoNickname =
+        state.partner_kakao_nickname || "";
+
+      if (partnerKakaoNickname) {
+        matchedKakaoNickname.textContent =
+          partnerKakaoNickname;
+
+        matchedKakaoBox.classList.remove(
+          "hidden"
+        );
+      }
+    } else {
+      choiceStatusElement.textContent =
+        "이번에는 매칭되지 않았어요.";
+
+      choiceStatusElement.className =
+        "muted";
+    }
+
+    setChoiceButtonsDisabled(true);
+  }
 }
 
 function showNotice(
@@ -1912,6 +2079,97 @@ async function loadMessages() {
   }
 }
 
+async function loadChoiceState() {
+  const response = await fetch(
+    `/api/room/${roomCode}/choice`,
+    {
+      cache: "no-store",
+      headers: authenticatedHeaders()
+    }
+  );
+
+  if (
+    redirectToHomeOnUnauthorized(response)
+  ) {
+    return;
+  }
+
+  if (!response.ok) {
+    return;
+  }
+
+  const data = await response.json();
+
+  applyChoiceState(data);
+}
+
+async function sendChoice(choice) {
+  setChoiceButtonsDisabled(true);
+
+  try {
+    const response = await fetch(
+      `/api/room/${roomCode}/choice`,
+      {
+        method: "POST",
+        headers: authenticatedHeaders(
+          {
+            "Content-Type":
+              "application/json"
+          }
+        ),
+        body: JSON.stringify(
+          {
+            choice
+          }
+        )
+      }
+    );
+
+    if (
+      redirectToHomeOnUnauthorized(response)
+    ) {
+      return;
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      showNotice(
+        data.message
+        || "선택을 저장하지 못했어."
+      );
+
+      setChoiceButtonsDisabled(false);
+      return;
+    }
+
+    applyChoiceState(data);
+
+  } catch (error) {
+    console.error(error);
+
+    showNotice(
+      "선택 저장 중 오류가 발생했어."
+    );
+
+    setChoiceButtonsDisabled(false);
+  }
+}
+
+choiceLikeButton.addEventListener(
+  "click",
+  () => {
+    sendChoice("like");
+  }
+);
+
+choicePassButton.addEventListener(
+  "click",
+  () => {
+    sendChoice("pass");
+  }
+);
+
 async function sendText(content) {
   return fetch(
     `/api/room/${roomCode}/messages`,
@@ -2115,6 +2373,7 @@ document.getElementById(
 
 async function pollMessages() {
   await loadMessages();
+  await loadChoiceState();
 
   setTimeout(
     pollMessages,
@@ -2322,10 +2581,19 @@ def create_room():
         "",
     ).strip()[:20]
 
-    if not nickname:
+    kakao_nickname = request.form.get(
+        "kakao_nickname",
+        "",
+    ).strip()[:30]
+
+    if not nickname or not kakao_nickname:
         return render_template_string(
             HOME_HTML,
-            error="닉네임을 입력해줘.",
+            error=(
+                "채팅 닉네임과 "
+                "카카오톡 닉네임을 "
+                "모두 입력해줘."
+            ),
         )
 
     room_code = generate_room_code()
@@ -2353,14 +2621,16 @@ def create_room():
                 room_code,
                 user_token,
                 nickname,
+                kakao_nickname,
                 joined_at
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 room_code,
                 user_token,
                 nickname,
+                kakao_nickname,
                 created_at,
             ),
         )
@@ -2389,11 +2659,21 @@ def join_room():
         "",
     ).strip()[:20]
 
-    if not room_code or not nickname:
+    kakao_nickname = request.form.get(
+        "kakao_nickname",
+        "",
+    ).strip()[:30]
+
+    if (
+        not room_code
+        or not nickname
+        or not kakao_nickname
+    ):
         return render_template_string(
             HOME_HTML,
             error=(
-                "방 코드와 닉네임을 "
+                "방 코드, 채팅 닉네임, "
+                "카카오톡 닉네임을 "
                 "모두 입력해줘."
             ),
         )
@@ -2430,14 +2710,16 @@ def join_room():
                 room_code,
                 user_token,
                 nickname,
+                kakao_nickname,
                 joined_at
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 room_code,
                 user_token,
                 nickname,
+                kakao_nickname,
                 joined_at,
             ),
         )
@@ -2608,6 +2890,216 @@ def disconnect_room_screen(room_code: str):
     return jsonify(
         {
             "ok": True,
+        }
+    )
+
+
+# =========================================================
+# 호감 선택 API
+# =========================================================
+
+@app.route(
+    "/api/room/<room_code>/choice",
+    methods=["GET"],
+)
+@require_room_member_api
+def get_room_choice(room_code: str):
+    user_token = request.user_token
+
+    with db_connect() as connection:
+        my_row = connection.execute(
+            """
+            SELECT choice
+            FROM room_choices
+            WHERE room_code = ?
+              AND user_token = ?
+            """,
+            (
+                room_code,
+                user_token,
+            ),
+        ).fetchone()
+
+        rows = connection.execute(
+            """
+            SELECT
+                rc.user_token,
+                rc.choice,
+                m.kakao_nickname
+            FROM room_choices rc
+            JOIN members m
+              ON m.room_code = rc.room_code
+             AND m.user_token = rc.user_token
+            WHERE rc.room_code = ?
+            """,
+            (room_code,),
+        ).fetchall()
+
+    my_choice = (
+        my_row["choice"]
+        if my_row is not None
+        else ""
+    )
+
+    both_selected = (
+        len(rows) >= 2
+    )
+
+    matched = (
+        both_selected
+        and all(
+            row["choice"] == "like"
+            for row in rows[:2]
+        )
+    )
+
+    partner_kakao_nickname = ""
+
+    if matched:
+        for row in rows:
+            if row["user_token"] != user_token:
+                partner_kakao_nickname = (
+                    row["kakao_nickname"]
+                    or ""
+                )
+                break
+
+    return jsonify(
+        {
+            "ok": True,
+            "my_choice": my_choice,
+            "both_selected": both_selected,
+            "matched": matched,
+            "partner_kakao_nickname": (
+                partner_kakao_nickname
+            ),
+        }
+    )
+
+
+@app.route(
+    "/api/room/<room_code>/choice",
+    methods=["POST"],
+)
+@require_room_member_api
+def set_room_choice(room_code: str):
+    payload = (
+        request.get_json(silent=True)
+        or {}
+    )
+
+    choice = str(
+        payload.get(
+            "choice",
+            "",
+        )
+    ).strip().lower()
+
+    if choice not in {
+        "like",
+        "pass",
+    }:
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "선택 값이 올바르지 않아."
+                ),
+            }
+        ), 400
+
+    user_token = request.user_token
+    selected_at = now_kst_iso()
+
+    with db_connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT 1
+            FROM room_choices
+            WHERE room_code = ?
+              AND user_token = ?
+            """,
+            (
+                room_code,
+                user_token,
+            ),
+        ).fetchone()
+
+        if existing is not None:
+            return jsonify(
+                {
+                    "ok": False,
+                    "message": (
+                        "이미 선택을 완료했어."
+                    ),
+                }
+            ), 409
+
+        connection.execute(
+            """
+            INSERT INTO room_choices(
+                room_code,
+                user_token,
+                choice,
+                selected_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                room_code,
+                user_token,
+                choice,
+                selected_at,
+            ),
+        )
+
+        rows = connection.execute(
+            """
+            SELECT
+                rc.user_token,
+                rc.choice,
+                m.kakao_nickname
+            FROM room_choices rc
+            JOIN members m
+              ON m.room_code = rc.room_code
+             AND m.user_token = rc.user_token
+            WHERE rc.room_code = ?
+            """,
+            (room_code,),
+        ).fetchall()
+
+    both_selected = (
+        len(rows) >= 2
+    )
+
+    matched = (
+        both_selected
+        and all(
+            row["choice"] == "like"
+            for row in rows[:2]
+        )
+    )
+
+    partner_kakao_nickname = ""
+
+    if matched:
+        for row in rows:
+            if row["user_token"] != user_token:
+                partner_kakao_nickname = (
+                    row["kakao_nickname"]
+                    or ""
+                )
+                break
+
+    return jsonify(
+        {
+            "ok": True,
+            "my_choice": choice,
+            "both_selected": both_selected,
+            "matched": matched,
+            "partner_kakao_nickname": (
+                partner_kakao_nickname
+            ),
         }
     )
 
