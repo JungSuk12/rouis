@@ -46,6 +46,12 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
 # 두 명이 모두 입장한 시점부터 유지되는 채팅 시간
 ROOM_SESSION_MINUTES = 10
 
+# 한 채팅방에서 동시에 유지할 수 있는 실제 접속 화면 수
+MAX_ACTIVE_CONNECTIONS = 2
+
+# 브라우저 신호가 이 시간 동안 없으면 끊긴 접속으로 처리
+ACTIVE_CONNECTION_TIMEOUT_SECONDS = 8
+
 PREFERRED_DB_PATH = os.environ.get(
     "CHAT_DB_PATH",
     "/var/data/contact_guard_chat.db",
@@ -188,6 +194,14 @@ def init_db() -> None:
                 nickname TEXT NOT NULL,
                 joined_at TEXT NOT NULL,
                 UNIQUE(room_code, user_token)
+            );
+
+            CREATE TABLE IF NOT EXISTS active_connections (
+                room_code TEXT NOT NULL,
+                connection_id TEXT NOT NULL,
+                user_token TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY(room_code, connection_id)
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -840,6 +854,13 @@ def get_request_user_token() -> str:
     return token
 
 
+def get_request_connection_id() -> str:
+    return request.headers.get(
+        "X-Connection-ID",
+        "",
+    ).strip()
+
+
 def get_room_member(
     room_code: str,
     user_token: str,
@@ -876,6 +897,163 @@ def room_member_count(
         ).fetchone()
 
     return int(row["count"])
+
+
+def cleanup_stale_connections(
+    room_code: str,
+) -> None:
+    cutoff = (
+        datetime.now(KST)
+        - timedelta(
+            seconds=ACTIVE_CONNECTION_TIMEOUT_SECONDS
+        )
+    ).isoformat(
+        timespec="seconds"
+    )
+
+    with db_connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM active_connections
+            WHERE room_code = ?
+              AND last_seen_at < ?
+            """,
+            (
+                room_code,
+                cutoff,
+            ),
+        )
+
+
+def register_active_connection(
+    room_code: str,
+    user_token: str,
+    connection_id: str,
+) -> bool:
+    cleanup_stale_connections(
+        room_code
+    )
+
+    now_value = now_kst_iso()
+
+    with db_connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT 1
+            FROM active_connections
+            WHERE room_code = ?
+              AND connection_id = ?
+            """,
+            (
+                room_code,
+                connection_id,
+            ),
+        ).fetchone()
+
+        if existing:
+            connection.execute(
+                """
+                UPDATE active_connections
+                SET
+                    user_token = ?,
+                    last_seen_at = ?
+                WHERE room_code = ?
+                  AND connection_id = ?
+                """,
+                (
+                    user_token,
+                    now_value,
+                    room_code,
+                    connection_id,
+                ),
+            )
+
+            return True
+
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM active_connections
+            WHERE room_code = ?
+            """,
+            (room_code,),
+        ).fetchone()
+
+        if int(row["count"]) >= MAX_ACTIVE_CONNECTIONS:
+            return False
+
+        connection.execute(
+            """
+            INSERT INTO active_connections(
+                room_code,
+                connection_id,
+                user_token,
+                last_seen_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                room_code,
+                connection_id,
+                user_token,
+                now_value,
+            ),
+        )
+
+    return True
+
+
+def refresh_active_connection(
+    room_code: str,
+    user_token: str,
+    connection_id: str,
+) -> bool:
+    if not connection_id:
+        return False
+
+    cleanup_stale_connections(
+        room_code
+    )
+
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE active_connections
+            SET last_seen_at = ?
+            WHERE room_code = ?
+              AND connection_id = ?
+              AND user_token = ?
+            """,
+            (
+                now_kst_iso(),
+                room_code,
+                connection_id,
+                user_token,
+            ),
+        )
+
+    return cursor.rowcount > 0
+
+
+def remove_active_connection(
+    room_code: str,
+    connection_id: str,
+) -> None:
+    if not connection_id:
+        return
+
+    with db_connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM active_connections
+            WHERE room_code = ?
+              AND connection_id = ?
+            """,
+            (
+                room_code,
+                connection_id,
+            ),
+        )
 
 
 def require_room_member_api(view):
@@ -928,8 +1106,29 @@ def require_room_member_api(view):
                 }
             ), 410
 
+        connection_id = (
+            get_request_connection_id()
+        )
+
+        if not refresh_active_connection(
+            normalized_room_code,
+            user_token,
+            connection_id,
+        ):
+            return jsonify(
+                {
+                    "ok": False,
+                    "connection_rejected": True,
+                    "message": (
+                        "이 채팅방은 동시에 "
+                        "두 개의 화면만 접속할 수 있어."
+                    ),
+                }
+            ), 409
+
         request.room_member = member
         request.user_token = user_token
+        request.connection_id = connection_id
 
         return view(
             normalized_room_code,
@@ -1374,6 +1573,27 @@ CHAT_HTML = """
 const roomCode = "{{ room_code }}";
 const initialToken = "{{ user_token }}";
 const tokenStorageKey = `contact_guard_token_${roomCode}`;
+const connectionStorageKey =
+  `contact_guard_connection_${roomCode}`;
+
+let connectionId =
+  sessionStorage.getItem(
+    connectionStorageKey
+  );
+
+if (!connectionId) {
+  connectionId =
+    (
+      crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random()}`
+    );
+
+  sessionStorage.setItem(
+    connectionStorageKey,
+    connectionId
+  );
+}
 
 localStorage.setItem(
   tokenStorageKey,
@@ -1413,6 +1633,7 @@ const noticeElement =
 function authenticatedHeaders(extra = {}) {
   return {
     "X-User-Token": userToken,
+    "X-Connection-ID": connectionId,
     ...extra
   };
 }
@@ -1523,6 +1744,24 @@ function redirectToHomeOnUnauthorized(
     return true;
   }
 
+  if (response.status === 409) {
+    showNotice(
+      "이미 두 개의 화면이 접속 중이야."
+    );
+
+    inputElement.disabled = true;
+    imageInputElement.disabled = true;
+
+    setTimeout(
+      () => {
+        window.location.href = "/";
+      },
+      1500
+    );
+
+    return true;
+  }
+
   if (response.status !== 401) {
     return false;
   }
@@ -1588,6 +1827,35 @@ function addMessage(message) {
 
   messagesElement.scrollTop =
     messagesElement.scrollHeight;
+}
+
+async function registerConnection() {
+  const response = await fetch(
+    `/api/room/${roomCode}/connect`,
+    {
+      method: "POST",
+      headers: authenticatedHeaders()
+    }
+  );
+
+  if (
+    redirectToHomeOnUnauthorized(response)
+  ) {
+    return false;
+  }
+
+  if (!response.ok) {
+    return false;
+  }
+
+  const data = await response.json();
+
+  roomExpiresAt =
+    data.expires_at || "";
+
+  updateRoomTimer();
+
+  return true;
 }
 
 async function loadMessages() {
@@ -1788,6 +2056,29 @@ inputElement.addEventListener(
   }
 );
 
+function releaseConnection() {
+  const payload = JSON.stringify(
+    {
+      connection_id: connectionId
+    }
+  );
+
+  navigator.sendBeacon(
+    `/api/room/${roomCode}/disconnect`,
+    new Blob(
+      [payload],
+      {
+        type: "application/json"
+      }
+    )
+  );
+}
+
+window.addEventListener(
+  "pagehide",
+  releaseConnection
+);
+
 document.getElementById(
   "leave-room"
 ).addEventListener(
@@ -1831,7 +2122,27 @@ async function pollMessages() {
   );
 }
 
-pollMessages();
+async function initializeConnection() {
+  try {
+    const connected =
+      await registerConnection();
+
+    if (!connected) {
+      return;
+    }
+
+    pollMessages();
+
+  } catch (error) {
+    console.error(error);
+
+    showNotice(
+      "채팅방 연결 중 오류가 발생했어."
+    );
+  }
+}
+
+initializeConnection();
 </script>
 </body>
 </html>
@@ -2182,6 +2493,122 @@ def chat_room(room_code: str):
         room_code=normalized_room_code,
         nickname=member["nickname"],
         user_token=user_token,
+    )
+
+
+# =========================================================
+# 접속 화면 관리 API
+# =========================================================
+
+@app.route(
+    "/api/room/<room_code>/connect",
+    methods=["POST"],
+)
+def connect_room_screen(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    user_token = get_request_user_token()
+    connection_id = get_request_connection_id()
+
+    member = get_room_member(
+        normalized_room_code,
+        user_token,
+    )
+
+    if member is None:
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "채팅방 인증이 만료됐어."
+                ),
+            }
+        ), 401
+
+    is_expired, expires_at = (
+        get_room_time_state(
+            normalized_room_code
+        )
+    )
+
+    if is_expired:
+        return jsonify(
+            {
+                "ok": False,
+                "expired": True,
+                "message": (
+                    "채팅 시간이 종료되어 "
+                    "연결이 끊겼어."
+                ),
+                "expires_at": expires_at,
+            }
+        ), 410
+
+    if not connection_id:
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "접속 화면 정보를 "
+                    "확인할 수 없어."
+                ),
+            }
+        ), 400
+
+    if not register_active_connection(
+        normalized_room_code,
+        user_token,
+        connection_id,
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "connection_rejected": True,
+                "message": (
+                    "이미 두 개의 화면이 "
+                    "접속 중이야."
+                ),
+            }
+        ), 409
+
+    return jsonify(
+        {
+            "ok": True,
+            "expires_at": expires_at,
+        }
+    )
+
+
+@app.route(
+    "/api/room/<room_code>/disconnect",
+    methods=["POST"],
+)
+def disconnect_room_screen(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    connection_id = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    ).get(
+        "connection_id",
+        "",
+    )
+
+    remove_active_connection(
+        normalized_room_code,
+        str(connection_id).strip(),
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+        }
     )
 
 
