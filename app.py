@@ -1248,8 +1248,8 @@ button {
 .hidden { display: none; }
 .chat {
   height: 100vh;
-  display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 .header {
@@ -1259,7 +1259,10 @@ button {
   align-items: flex-start;
 }
 .messages {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -1317,6 +1320,41 @@ button {
   color: var(--muted);
   font-size: 12px;
 }
+#choice-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+}
+.choice-button {
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #22252c;
+  color: var(--text);
+  font-size: 14px;
+}
+.choice-button:hover:not(:disabled) {
+  background: #2a2e36;
+}
+.choice-button.selected-like {
+  border-color: #8de3aa;
+  background: #21452d;
+  color: #c9f7d7;
+}
+.choice-button.selected-pass {
+  border-color: #e49a9a;
+  background: #4b2929;
+  color: #ffd0d0;
+}
+.choice-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+#matched-kakao-box {
+  margin: 0;
+}
 table {
   width: 100%;
   min-width: 700px;
@@ -1341,13 +1379,29 @@ a { color: white; }
   }
   .page {
     width: calc(100% - 16px);
-    padding: 12px 0;
+    padding: 12px 0 24px;
   }
   .chat {
     height: auto;
-    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-anchor: none;
+  }
+  .messages {
+    flex: 0 0 auto;
+    width: 100%;
+    height: 60dvh;
+    min-height: 390px;
+    max-height: 620px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
   .composer {
+    flex: 0 0 auto;
+    width: 100%;
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 7px;
     align-items: stretch;
@@ -1364,12 +1418,30 @@ a { color: white; }
   .file-button {
     padding: 0 11px;
   }
+  .file-name {
+    min-height: 0;
+  }
   .message {
     width: 90%;
   }
   .header {
     flex-direction: column;
     gap: 6px;
+  }
+  #choice-bar {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .choice-button {
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  #matched-kakao-box {
+    padding: 9px;
+    font-size: 13px;
   }
 }
 </style>
@@ -1638,6 +1710,35 @@ CHAT_HTML = """
     </header>
 
     <section
+      id="choice-bar"
+      aria-label="상대 선택"
+    >
+      <button
+        id="choice-like"
+        class="choice-button"
+        type="button"
+      >
+        마음에 듦
+      </button>
+
+      <button
+        id="choice-pass"
+        class="choice-button"
+        type="button"
+      >
+        안 맞음
+      </button>
+    </section>
+
+    <div
+      id="matched-kakao-box"
+      class="alert success hidden"
+    >
+      상대 카카오톡 닉네임:
+      <strong id="matched-kakao-nickname"></strong>
+    </div>
+
+    <section
       id="messages"
       class="messages"
     ></section>
@@ -1646,45 +1747,6 @@ CHAT_HTML = """
       id="notice"
       class="alert hidden"
     ></div>
-
-    <section
-      id="choice-card"
-      class="card"
-    >
-      <h2>상대가 마음에 드나요?</h2>
-
-      <p
-        id="choice-status"
-        class="muted"
-      >
-        선택 결과는 서로 모두 선택한 뒤에만 안내돼.
-      </p>
-
-      <div
-        id="matched-kakao-box"
-        class="alert success hidden"
-      >
-        상대 카카오톡 닉네임:
-        <strong id="matched-kakao-nickname"></strong>
-      </div>
-
-      <div class="grid">
-        <button
-          id="choice-like"
-          class="primary"
-          type="button"
-        >
-          마음에 들어요
-        </button>
-
-        <button
-          id="choice-pass"
-          type="button"
-        >
-          아닌 것 같아요
-        </button>
-      </div>
-    </section>
 
     <p
       id="file-name"
@@ -1779,11 +1841,6 @@ const fileNameElement =
 const noticeElement =
   document.getElementById("notice");
 
-const choiceStatusElement =
-  document.getElementById(
-    "choice-status"
-  );
-
 const choiceLikeButton =
   document.getElementById(
     "choice-like"
@@ -1831,49 +1888,48 @@ function applyChoiceState(
   const matched =
     Boolean(state.matched);
 
+  choiceLikeButton.classList.remove(
+    "selected-like"
+  );
+
+  choicePassButton.classList.remove(
+    "selected-pass"
+  );
+
+  matchedKakaoBox.classList.add(
+    "hidden"
+  );
+
+  matchedKakaoNickname.textContent = "";
+
   if (myChoice === "like") {
-    choiceStatusElement.textContent =
-      "마음에 들어요를 선택했어. "
-      + "상대의 선택을 기다리는 중이야.";
+    choiceLikeButton.classList.add(
+      "selected-like"
+    );
 
     setChoiceButtonsDisabled(true);
-  }
-
-  if (myChoice === "pass") {
-    choiceStatusElement.textContent =
-      "선택이 완료됐어.";
+  } else if (myChoice === "pass") {
+    choicePassButton.classList.add(
+      "selected-pass"
+    );
 
     setChoiceButtonsDisabled(true);
+  } else {
+    setChoiceButtonsDisabled(false);
   }
 
-  if (bothSelected) {
-    if (matched) {
-      choiceStatusElement.textContent =
-        "서로 마음에 들었어요.";
+  if (bothSelected && matched) {
+    const partnerKakaoNickname =
+      state.partner_kakao_nickname || "";
 
-      choiceStatusElement.className =
-        "success";
+    if (partnerKakaoNickname) {
+      matchedKakaoNickname.textContent =
+        partnerKakaoNickname;
 
-      const partnerKakaoNickname =
-        state.partner_kakao_nickname || "";
-
-      if (partnerKakaoNickname) {
-        matchedKakaoNickname.textContent =
-          partnerKakaoNickname;
-
-        matchedKakaoBox.classList.remove(
-          "hidden"
-        );
-      }
-    } else {
-      choiceStatusElement.textContent =
-        "이번에는 매칭되지 않았어요.";
-
-      choiceStatusElement.className =
-        "muted";
+      matchedKakaoBox.classList.remove(
+        "hidden"
+      );
     }
-
-    setChoiceButtonsDisabled(true);
   }
 }
 
@@ -2231,14 +2287,28 @@ async function sendChoice(choice) {
 choiceLikeButton.addEventListener(
   "click",
   () => {
-    sendChoice("like");
+    const confirmed = window.confirm(
+      "마음에 듦을 선택할까? "
+      + "선택 후에는 바꿀 수 없어."
+    );
+
+    if (confirmed) {
+      sendChoice("like");
+    }
   }
 );
 
 choicePassButton.addEventListener(
   "click",
   () => {
-    sendChoice("pass");
+    const confirmed = window.confirm(
+      "안 맞음을 선택할까? "
+      + "선택 후에는 바꿀 수 없어."
+    );
+
+    if (confirmed) {
+      sendChoice("pass");
+    }
   }
 );
 
