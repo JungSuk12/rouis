@@ -1336,15 +1336,41 @@ a { color: white; }
   font-size: 1.1em;
 }
 @media (max-width: 700px) {
-  .grid { grid-template-columns: 1fr; }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  .page {
+    width: calc(100% - 16px);
+    padding: 12px 0;
+  }
+  .chat {
+    height: auto;
+    min-height: 100vh;
+  }
   .composer {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 7px;
+    align-items: stretch;
+  }
+  .composer textarea {
+    min-width: 0;
+    padding: 11px;
   }
   .composer button {
-    grid-column: 1 / -1;
+    grid-column: auto;
+    min-width: 58px;
+    padding: 10px 12px;
   }
-  .message { width: 90%; }
-  .header { flex-direction: column; }
+  .file-button {
+    padding: 0 11px;
+  }
+  .message {
+    width: 90%;
+  }
+  .header {
+    flex-direction: column;
+    gap: 6px;
+  }
 }
 </style>
 """
