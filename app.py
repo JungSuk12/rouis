@@ -184,7 +184,9 @@ def init_db() -> None:
                 room_code TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
-                expires_at TEXT
+                expires_at TEXT,
+                is_admin_room INTEGER NOT NULL DEFAULT 0,
+                admin_token TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS members (
@@ -246,6 +248,32 @@ def init_db() -> None:
                 """
                 ALTER TABLE members
                 ADD COLUMN kakao_nickname TEXT
+                NOT NULL DEFAULT ''
+                """
+            )
+
+        if not column_exists(
+            connection,
+            "rooms",
+            "is_admin_room",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE rooms
+                ADD COLUMN is_admin_room INTEGER
+                NOT NULL DEFAULT 0
+                """
+            )
+
+        if not column_exists(
+            connection,
+            "rooms",
+            "admin_token",
+        ):
+            connection.execute(
+                """
+                ALTER TABLE rooms
+                ADD COLUMN admin_token TEXT
                 NOT NULL DEFAULT ''
                 """
             )
@@ -318,7 +346,8 @@ def get_room_time_state(
             """
             SELECT
                 started_at,
-                expires_at
+                expires_at,
+                is_admin_room
             FROM rooms
             WHERE room_code = ?
             """,
@@ -327,6 +356,9 @@ def get_room_time_state(
 
     if room is None:
         return True, ""
+
+    if int(room["is_admin_room"] or 0) == 1:
+        return False, ""
 
     expires_at = (
         room["expires_at"]
@@ -363,7 +395,8 @@ def start_room_session_if_ready(
             """
             SELECT
                 started_at,
-                expires_at
+                expires_at,
+                is_admin_room
             FROM rooms
             WHERE room_code = ?
             """,
@@ -371,6 +404,9 @@ def start_room_session_if_ready(
         ).fetchone()
 
         if room is None:
+            return ""
+
+        if int(room["is_admin_room"] or 0) == 1:
             return ""
 
         if room["expires_at"]:
@@ -1295,6 +1331,46 @@ button {
   max-width: 100%;
   max-height: 460px;
   border-radius: 14px;
+  cursor: zoom-in;
+}
+.image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.94);
+}
+.image-viewer.hidden {
+  display: none;
+}
+.image-viewer-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  cursor: zoom-out;
+}
+.image-viewer-close {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: 14px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(20, 20, 20, 0.78);
+  color: white;
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1;
+}
+body.image-viewer-open {
+  overflow: hidden;
 }
 .composer {
   display: grid;
@@ -1695,9 +1771,13 @@ CHAT_HTML = """
           {{ nickname }}
           ·
           <span id="member-count">1</span>/2명
-          ·
-          남은 시간
-          <strong id="room-timer">10:00</strong>
+          {% if is_admin_room %}
+            · 관리자 방
+            · <strong id="room-timer">무제한</strong>
+          {% else %}
+            · 남은 시간
+            <strong id="room-timer">10:00</strong>
+          {% endif %}
         </p>
       </div>
 
@@ -1784,9 +1864,33 @@ CHAT_HTML = """
     </form>
   </main>
 
+  <div
+    id="image-viewer"
+    class="image-viewer hidden"
+    role="dialog"
+    aria-modal="true"
+    aria-label="이미지 확대 보기"
+  >
+    <button
+      id="image-viewer-close"
+      class="image-viewer-close"
+      type="button"
+      aria-label="확대 이미지 닫기"
+    >
+      ×
+    </button>
+
+    <img
+      id="image-viewer-image"
+      class="image-viewer-image"
+      alt="확대된 채팅 이미지"
+    >
+  </div>
+
 <script>
 const roomCode = "{{ room_code }}";
 const initialToken = "{{ user_token }}";
+const isAdminRoom = {{ "true" if is_admin_room else "false" }};
 const tokenStorageKey = `contact_guard_token_${roomCode}`;
 const connectionStorageKey =
   `contact_guard_connection_${roomCode}`;
@@ -1851,6 +1955,19 @@ const sendButtonElement =
 const noticeElement =
   document.getElementById("notice");
 
+const imageViewerElement =
+  document.getElementById("image-viewer");
+
+const imageViewerImageElement =
+  document.getElementById(
+    "image-viewer-image"
+  );
+
+const imageViewerCloseButton =
+  document.getElementById(
+    "image-viewer-close"
+  );
+
 const choiceLikeButton =
   document.getElementById(
     "choice-like"
@@ -1870,6 +1987,70 @@ const matchedKakaoNickname =
   document.getElementById(
     "matched-kakao-nickname"
   );
+
+function openImageViewer(
+  imageSource,
+  imageAlt
+) {
+  imageViewerImageElement.src =
+    imageSource;
+
+  imageViewerImageElement.alt =
+    imageAlt || "확대된 채팅 이미지";
+
+  imageViewerElement.classList.remove(
+    "hidden"
+  );
+
+  document.body.classList.add(
+    "image-viewer-open"
+  );
+}
+
+function closeImageViewer() {
+  imageViewerElement.classList.add(
+    "hidden"
+  );
+
+  document.body.classList.remove(
+    "image-viewer-open"
+  );
+
+  imageViewerImageElement.removeAttribute(
+    "src"
+  );
+}
+
+imageViewerCloseButton.addEventListener(
+  "click",
+  closeImageViewer
+);
+
+imageViewerElement.addEventListener(
+  "click",
+  event => {
+    if (
+      event.target === imageViewerElement
+      || event.target === imageViewerImageElement
+    ) {
+      closeImageViewer();
+    }
+  }
+);
+
+document.addEventListener(
+  "keydown",
+  event => {
+    if (
+      event.key === "Escape"
+      && !imageViewerElement.classList.contains(
+        "hidden"
+      )
+    ) {
+      closeImageViewer();
+    }
+  }
+);
 
 function authenticatedHeaders(extra = {}) {
   return {
@@ -2005,6 +2186,11 @@ function updateRoomTimer() {
   const timerElement =
     document.getElementById("room-timer");
 
+  if (isAdminRoom) {
+    timerElement.textContent = "무제한";
+    return;
+  }
+
   if (!roomExpiresAt) {
     timerElement.textContent = "10:00";
     return;
@@ -2115,6 +2301,16 @@ function addMessage(message) {
     image.src = message.content;
     image.alt = "채팅 이미지";
     image.loading = "lazy";
+
+    image.addEventListener(
+      "click",
+      () => {
+        openImageViewer(
+          image.currentSrc || image.src,
+          image.alt
+        );
+      }
+    );
 
     bubble.appendChild(image);
   } else {
@@ -2678,27 +2874,88 @@ ADMIN_HTML = """
     </header>
 
     <section class="card">
+      <h2>시간 제한 없는 관리자 방</h2>
+
+      <p class="muted">
+        관리자와 상대방 한 명이 사용하는 1:1 방이야.
+        일반 방과 달리 10분 제한이 없어.
+      </p>
+
+      <form
+        method="post"
+        action="{{ url_for('admin_create_room') }}"
+      >
+        <label>관리자 채팅 닉네임</label>
+
+        <input
+          name="nickname"
+          maxlength="20"
+          value="관리자"
+          required
+        >
+
+        <label>관리자 카카오톡 닉네임</label>
+
+        <input
+          name="kakao_nickname"
+          maxlength="30"
+          required
+        >
+
+        <button class="primary full">
+          관리자 방 만들고 입장
+        </button>
+      </form>
+    </section>
+
+    <section class="card">
       <h2>방 현황</h2>
 
       <div class="table-wrap">
         <table>
           <tr>
             <th>방</th>
+            <th>종류</th>
             <th>참여자</th>
             <th>정상 메시지</th>
+            <th>시간</th>
+            <th>관리</th>
             <th>생성</th>
           </tr>
 
           {% for room in rooms %}
             <tr>
               <td>{{ room.room_code }}</td>
+              <td>
+                {% if room.is_admin_room %}
+                  관리자 방
+                {% else %}
+                  일반 방
+                {% endif %}
+              </td>
               <td>{{ room.member_count }}</td>
               <td>{{ room.message_count }}</td>
+              <td>
+                {% if room.is_admin_room %}
+                  무제한
+                {% else %}
+                  10분
+                {% endif %}
+              </td>
+              <td>
+                {% if room.is_admin_room %}
+                  <a href="{{ url_for('admin_open_room', room_code=room.room_code) }}">
+                    관리자 입장
+                  </a>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
               <td>{{ room.created_at }}</td>
             </tr>
           {% else %}
             <tr>
-              <td colspan="4">
+              <td colspan="7">
                 방이 없어.
               </td>
             </tr>
@@ -2947,6 +3204,21 @@ def chat_room(room_code: str):
             url_for("home")
         )
 
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT is_admin_room
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    is_admin_room = bool(
+        room
+        and int(room["is_admin_room"] or 0) == 1
+    )
+
     is_expired, _ = get_room_time_state(
         normalized_room_code
     )
@@ -2961,6 +3233,7 @@ def chat_room(room_code: str):
         room_code=normalized_room_code,
         nickname=member["nickname"],
         user_token=user_token,
+        is_admin_room=is_admin_room,
     )
 
 
@@ -3835,6 +4108,113 @@ def admin_logout():
 
 
 @app.route(
+    "/admin/create-room",
+    methods=["POST"],
+)
+@admin_required
+def admin_create_room():
+    nickname = request.form.get(
+        "nickname",
+        "",
+    ).strip()[:20]
+
+    kakao_nickname = request.form.get(
+        "kakao_nickname",
+        "",
+    ).strip()[:30]
+
+    if not nickname or not kakao_nickname:
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    room_code = generate_room_code()
+    user_token = generate_user_token()
+    created_at = now_kst_iso()
+
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO rooms(
+                room_code,
+                created_at,
+                is_admin_room,
+                admin_token
+            )
+            VALUES (?, ?, 1, ?)
+            """,
+            (
+                room_code,
+                created_at,
+                user_token,
+            ),
+        )
+
+        connection.execute(
+            """
+            INSERT INTO members(
+                room_code,
+                user_token,
+                nickname,
+                kakao_nickname,
+                joined_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                room_code,
+                user_token,
+                nickname,
+                kakao_nickname,
+                created_at,
+            ),
+        )
+
+    return redirect(
+        url_for(
+            "chat_room",
+            room_code=room_code,
+            token=user_token,
+        )
+    )
+
+
+@app.route(
+    "/admin/room/<room_code>",
+    methods=["GET"],
+)
+@admin_required
+def admin_open_room(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT admin_token
+            FROM rooms
+            WHERE room_code = ?
+              AND is_admin_room = 1
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    if room is None or not room["admin_token"]:
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    return redirect(
+        url_for(
+            "chat_room",
+            room_code=normalized_room_code,
+            token=room["admin_token"],
+        )
+    )
+
+
+@app.route(
     "/admin",
     methods=["GET"],
 )
@@ -3861,6 +4241,7 @@ def admin_dashboard():
             SELECT
                 r.room_code,
                 r.created_at,
+                r.is_admin_room,
                 COUNT(
                     DISTINCT m.user_token
                 ) AS member_count,
@@ -3874,7 +4255,8 @@ def admin_dashboard():
                 ON msg.room_code = r.room_code
             GROUP BY
                 r.room_code,
-                r.created_at
+                r.created_at,
+                r.is_admin_room
             ORDER BY r.created_at DESC
             LIMIT 100
             """
