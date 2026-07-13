@@ -1608,6 +1608,7 @@ a { color: white; }
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 7px;
     align-items: stretch;
+    scroll-margin-bottom: 18px;
   }
   .composer textarea {
     min-width: 0;
@@ -2078,6 +2079,64 @@ const formElement =
 
 const sendButtonElement =
   document.getElementById("send-button");
+
+let composerVisibilityTimer = null;
+
+function keepComposerVisible(
+  focusInput = false
+) {
+  if (composerVisibilityTimer) {
+    clearTimeout(
+      composerVisibilityTimer
+    );
+  }
+
+  composerVisibilityTimer = setTimeout(
+    () => {
+      if (focusInput && !roomExpired) {
+        inputElement.focus(
+          {
+            preventScroll: true
+          }
+        );
+      }
+
+      formElement.scrollIntoView(
+        {
+          block: "end",
+          inline: "nearest",
+          behavior: "smooth"
+        }
+      );
+
+      requestAnimationFrame(
+        () => {
+          formElement.scrollIntoView(
+            {
+              block: "end",
+              inline: "nearest"
+            }
+          );
+        }
+      );
+    },
+    120
+  );
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener(
+    "resize",
+    () => {
+      if (
+        document.activeElement
+        === inputElement
+      ) {
+        keepComposerVisible(false);
+      }
+    }
+  );
+}
 
 const noticeElement =
   document.getElementById("notice");
@@ -2693,6 +2752,10 @@ imageInputElement.addEventListener(
       file
         ? `선택한 사진: ${file.name}`
         : "";
+
+    if (file) {
+      keepComposerVisible(true);
+    }
   }
 );
 
@@ -2758,11 +2821,7 @@ formElement.addEventListener(
 
       await loadMessages();
 
-      inputElement.focus(
-        {
-          preventScroll: true
-        }
-      );
+      keepComposerVisible(true);
 
     } catch (error) {
       console.error(error);
@@ -2776,16 +2835,7 @@ formElement.addEventListener(
       button.textContent = "전송";
 
       if (!roomExpired) {
-        setTimeout(
-          () => {
-            inputElement.focus(
-              {
-                preventScroll: true
-              }
-            );
-          },
-          0
-        );
+        keepComposerVisible(true);
       }
     }
   }
