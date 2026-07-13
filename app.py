@@ -267,6 +267,19 @@ KOREAN_DIGIT_WORDS: Dict[str, str] = {
     "여덟": "8",
     "구": "9",
     "아홉": "9",
+
+    # 영문·발음 우회 표현
+    "원": "1",
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
 }
 
 CONTACT_KEYWORDS = [
@@ -330,30 +343,63 @@ SNS_ID_PATTERN = re.compile(
 )
 
 
+NUMERIC_OBFUSCATION_REPLACEMENTS: Dict[str, str] = {
+    "o": "0",
+    "ｏ": "0",
+    "l": "1",
+    "i": "1",
+    "|": "1",
+    "０": "0",
+    "１": "1",
+    "２": "2",
+    "３": "3",
+    "４": "4",
+    "５": "5",
+    "６": "6",
+    "７": "7",
+    "８": "8",
+    "９": "9",
+}
+
+
+def count_numeric_obfuscation_items(
+    text: str,
+) -> int:
+    value = text.casefold()
+
+    numeric_items = (
+        list(KOREAN_DIGIT_WORDS.keys())
+        + list(
+            NUMERIC_OBFUSCATION_REPLACEMENTS.keys()
+        )
+        + list("0123456789")
+    )
+
+    pattern = re.compile(
+        "|".join(
+            re.escape(item)
+            for item in sorted(
+                set(numeric_items),
+                key=len,
+                reverse=True,
+            )
+        ),
+        re.IGNORECASE,
+    )
+
+    return len(
+        pattern.findall(value)
+    )
+
+
 def normalize_for_contact_detection(
     text: str,
 ) -> str:
     value = text.casefold()
 
-    replacements = {
-        "o": "0",
-        "ｏ": "0",
-        "l": "1",
-        "i": "1",
-        "|": "1",
-        "０": "0",
-        "１": "1",
-        "２": "2",
-        "３": "3",
-        "４": "4",
-        "５": "5",
-        "６": "6",
-        "７": "7",
-        "８": "8",
-        "９": "9",
-    }
-
-    for source, target in replacements.items():
+    for source, target in (
+        NUMERIC_OBFUSCATION_REPLACEMENTS.items()
+    ):
         value = value.replace(
             source,
             target,
@@ -391,6 +437,12 @@ def detect_contact_info(
 
     lowered = text.casefold()
 
+    numeric_item_count = (
+        count_numeric_obfuscation_items(
+            text
+        )
+    )
+
     normalized = normalize_for_contact_detection(
         text
     )
@@ -405,6 +457,13 @@ def detect_contact_info(
     ):
         reasons.append(
             "연락처 교환 표현"
+        )
+
+    # 숫자·한글 숫자·영문 숫자·우회 문자가
+    # 문장 안에 총 5개 이상 있으면 전송 차단
+    if numeric_item_count >= 5:
+        reasons.append(
+            "우회 숫자 표현"
         )
 
     if URL_PATTERN.search(text):
@@ -438,7 +497,6 @@ def detect_contact_info(
     return list(
         dict.fromkeys(reasons)
     )
-
 
 
 # =========================================================
