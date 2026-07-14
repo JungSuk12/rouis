@@ -5201,6 +5201,7 @@ def admin_dashboard():
                 ON m.room_code = r.room_code
             LEFT JOIN messages msg
                 ON msg.room_code = r.room_code
+            WHERE r.is_admin_room = 0
             GROUP BY
                 r.room_code,
                 r.created_at,
