@@ -406,6 +406,27 @@ def get_public_entry_enabled() -> bool:
     ).strip() != "0"
 
 
+def is_admin_room_code(
+    room_code: str,
+) -> bool:
+    normalized_room_code = room_code.upper().strip()
+
+    with db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT is_admin_room
+            FROM rooms
+            WHERE room_code = ?
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    return bool(
+        row
+        and int(row["is_admin_room"] or 0) == 1
+    )
+
+
 def set_public_entry_enabled(
     enabled: bool,
 ) -> None:
@@ -1449,6 +1470,30 @@ def require_room_member_api(view):
             room_code.upper().strip()
         )
 
+        if (
+            not get_public_entry_enabled()
+            and not is_admin_room_code(
+                normalized_room_code
+            )
+        ):
+            write_status_log(
+                "SERVICE_MODE",
+                "BLOCKED",
+                "서비스 OFF 상태에서 일반 방 API 이용을 차단했어.",
+                normalized_room_code,
+            )
+
+            return jsonify(
+                {
+                    "ok": False,
+                    "service_disabled": True,
+                    "message": (
+                        "현재 서비스 이용이 "
+                        "비활성화되었습니다."
+                    ),
+                }
+            ), 503
+
         user_token = (
             get_request_user_token()
         )
@@ -2106,7 +2151,7 @@ CHAT_HTML = """
     >
       <div class="header" style="align-items:center;">
         <div>
-          <strong>전체 서버 일반 사용자 이용 설정</strong>
+          <strong>전체 서버 서비스 이용 설정</strong>
           <div
             id="admin-admission-status"
             class="muted small"
@@ -2469,18 +2514,18 @@ function renderAdminAdmissionState() {
 
   if (publicEntryEnabled) {
     adminAdmissionStatus.textContent =
-      "현재 일반 사용자의 새 방 만들기와 방 참여가 가능해.";
+      "현재 서비스 ON · 일반 사용자가 이용할 수 있어.";
 
     adminAdmissionToggle.textContent =
-      "전체 서버 신규 이용 막기";
+      "전체 서버 이용 OFF";
 
     adminAdmissionToggle.className = "";
   } else {
     adminAdmissionStatus.textContent =
-      "현재 일반 사용자의 새 방 만들기와 방 참여가 차단됐어.";
+      "현재 서비스 OFF · 관리자만 이용할 수 있어.";
 
     adminAdmissionToggle.textContent =
-      "전체 서버 신규 이용 열기";
+      "전체 서버 이용 ON";
 
     adminAdmissionToggle.className =
       "primary";
@@ -2496,8 +2541,8 @@ async function toggleAdminAdmissionMode() {
 
   const confirmed = window.confirm(
     nextEnabled
-      ? "일반 사용자의 새 방 만들기와 방 참여를 활성화할까?"
-      : "일반 사용자의 새 방 만들기와 방 참여를 비활성화할까?"
+      ? "전체 서버 일반 사용자 이용을 다시 활성화할까?"
+      : "서버는 유지하고 일반 사용자 이용을 전부 비활성화할까?"
   );
 
   if (!confirmed) {
@@ -2543,8 +2588,8 @@ async function toggleAdminAdmissionMode() {
 
     showNotice(
       publicEntryEnabled
-        ? "일반 사용자 이용을 활성화했어."
-        : "일반 사용자 이용을 비활성화했어.",
+        ? "전체 서버 일반 사용자 이용을 ON으로 바꿨어."
+        : "전체 서버 일반 사용자 이용을 OFF로 바꿨어.",
       true
     );
 
@@ -3949,6 +3994,25 @@ def chat_room(room_code: str):
         and int(room["is_admin_room"] or 0) == 1
     )
 
+    if (
+        not get_public_entry_enabled()
+        and not is_admin_room
+    ):
+        write_status_log(
+            "SERVICE_MODE",
+            "BLOCKED",
+            "서비스 OFF 상태에서 일반 방 화면 접속을 차단했어.",
+            normalized_room_code,
+        )
+
+        return render_template_string(
+            HOME_HTML,
+            error=(
+                "현재 서비스 이용이 "
+                "비활성화되었습니다."
+            ),
+        ), 503
+
     is_admin_owner = bool(
         is_admin_room
         and room
@@ -4016,11 +4080,23 @@ def admin_room_admission_mode(room_code: str):
             (normalized_room_code,),
         ).fetchone()
 
+    has_admin_token = bool(
+        user_token
+        and user_token
+        == str(room["admin_token"] or "")
+    ) if room is not None else False
+
+    has_admin_session = bool(
+        session.get("admin_authenticated")
+        is True
+    )
+
     if (
         room is None
-        or not user_token
-        or user_token
-        != str(room["admin_token"] or "")
+        or not (
+            has_admin_token
+            or has_admin_session
+        )
     ):
         return jsonify(
             {
