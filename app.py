@@ -3432,6 +3432,31 @@ ADMIN_HTML = """
       ></pre>
     </section>
 
+
+    <section class="card">
+      <h2>일반 사용자 신규 이용 설정</h2>
+
+      <p class="muted">
+        서버와 기존 채팅방은 유지한 채,
+        새로운 방 만들기와 새로운 방 참여만 차단하거나 허용해.
+      </p>
+
+      <div
+        id="admin-admission-summary"
+        class="alert"
+      >
+        상태 확인 중...
+      </div>
+
+      <button
+        id="admin-admission-toggle"
+        class="primary full"
+        type="button"
+      >
+        불러오는 중...
+      </button>
+    </section>
+
     <section class="card">
       <h2>시간 제한 없는 관리자 방</h2>
 
@@ -3606,6 +3631,180 @@ ADMIN_HTML = """
   </main>
 
 <script>
+
+const adminAdmissionSummary =
+  document.getElementById(
+    "admin-admission-summary"
+  );
+
+const adminAdmissionToggle =
+  document.getElementById(
+    "admin-admission-toggle"
+  );
+
+let adminPublicEntryEnabled = true;
+let adminAdmissionRequestRunning = false;
+
+function renderAdminAdmissionState() {
+  if (
+    !adminAdmissionSummary
+    || !adminAdmissionToggle
+  ) {
+    return;
+  }
+
+  if (adminPublicEntryEnabled) {
+    adminAdmissionSummary.className =
+      "alert success";
+
+    adminAdmissionSummary.textContent =
+      "현재 일반 사용자의 새 방 만들기와 방 참여가 가능해.";
+
+    adminAdmissionToggle.textContent =
+      "신규 이용 차단하기";
+
+    adminAdmissionToggle.className =
+      "full";
+  } else {
+    adminAdmissionSummary.className =
+      "alert error";
+
+    adminAdmissionSummary.textContent =
+      "현재 일반 사용자의 새 방 만들기와 방 참여가 차단되어 있어.";
+
+    adminAdmissionToggle.textContent =
+      "신규 이용 다시 허용하기";
+
+    adminAdmissionToggle.className =
+      "primary full";
+  }
+}
+
+async function loadAdminAdmissionState() {
+  if (
+    !adminAdmissionSummary
+    || !adminAdmissionToggle
+  ) {
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      "/api/admin/admission-mode",
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          "Accept": "application/json"
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message
+        || `HTTP ${response.status}`
+      );
+    }
+
+    adminPublicEntryEnabled = Boolean(
+      data.public_entry_enabled
+    );
+
+    renderAdminAdmissionState();
+
+  } catch (error) {
+    adminAdmissionSummary.className =
+      "alert error";
+
+    adminAdmissionSummary.textContent =
+      "신규 이용 상태를 불러오지 못했어.";
+
+    adminAdmissionToggle.disabled = true;
+  }
+}
+
+async function toggleAdminAdmissionState() {
+  if (
+    !adminAdmissionToggle
+    || adminAdmissionRequestRunning
+  ) {
+    return;
+  }
+
+  const nextEnabled =
+    !adminPublicEntryEnabled;
+
+  const confirmed = window.confirm(
+    nextEnabled
+      ? "일반 사용자의 새 방 만들기와 방 참여를 다시 허용할까?"
+      : "일반 사용자의 새 방 만들기와 방 참여를 차단할까? 이미 들어온 사용자는 계속 이용할 수 있어."
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  adminAdmissionRequestRunning = true;
+  adminAdmissionToggle.disabled = true;
+
+  try {
+    const response = await fetch(
+      "/api/admin/admission-mode",
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(
+          {
+            enabled: nextEnabled
+          }
+        )
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message
+        || `HTTP ${response.status}`
+      );
+    }
+
+    adminPublicEntryEnabled = Boolean(
+      data.public_entry_enabled
+    );
+
+    renderAdminAdmissionState();
+
+  } catch (error) {
+    window.alert(
+      error instanceof Error
+        ? error.message
+        : String(error)
+    );
+
+  } finally {
+    adminAdmissionRequestRunning = false;
+    adminAdmissionToggle.disabled = false;
+  }
+}
+
+if (adminAdmissionToggle) {
+  adminAdmissionToggle.addEventListener(
+    "click",
+    toggleAdminAdmissionState
+  );
+}
+
+loadAdminAdmissionState();
+
 const healthSummaryElement =
   document.getElementById(
     "health-summary"
@@ -5032,6 +5231,66 @@ def admin_login():
     return render_template_string(
         ADMIN_LOGIN_HTML,
         error=error,
+    )
+
+
+
+@app.route(
+    "/api/admin/admission-mode",
+    methods=["GET", "POST"],
+)
+def admin_admission_mode():
+    if not session.get(
+        "admin_authenticated"
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "message": "관리자 로그인이 필요해.",
+            }
+        ), 401
+
+    if request.method == "GET":
+        return jsonify(
+            {
+                "ok": True,
+                "public_entry_enabled": (
+                    get_public_entry_enabled()
+                ),
+            }
+        )
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    enabled = bool(
+        data.get("enabled")
+    )
+
+    set_public_entry_enabled(
+        enabled
+    )
+
+    write_status_log(
+        event_type="PUBLIC_ENTRY_MODE",
+        status=(
+            "ENABLED"
+            if enabled
+            else "DISABLED"
+        ),
+        message=(
+            "일반 사용자 신규 방 생성과 참여를 허용했어."
+            if enabled
+            else "일반 사용자 신규 방 생성과 참여를 차단했어."
+        ),
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "public_entry_enabled": enabled,
+        }
     )
 
 
