@@ -1089,6 +1089,105 @@ def save_clean_image(raw_bytes: bytes) -> Tuple[str, str]:
 # 방/사용자 토큰
 # =========================================================
 
+RANDOM_NICKNAME_FOODS = [
+    "치킨",
+    "피자",
+    "햄버거",
+    "떡볶이",
+    "라면",
+    "김밥",
+    "초밥",
+    "돈까스",
+    "짜장면",
+    "짬뽕",
+    "삼겹살",
+    "불고기",
+    "족발",
+    "보쌈",
+    "닭갈비",
+    "닭강정",
+    "순대",
+    "오므라이스",
+    "카레",
+    "파스타",
+    "리조또",
+    "샌드위치",
+    "핫도그",
+    "붕어빵",
+    "호떡",
+    "아이스크림",
+    "와플",
+]
+
+RANDOM_NICKNAME_ANIMALS = [
+    "고양이",
+    "강아지",
+    "토끼",
+    "여우",
+    "너구리",
+    "수달",
+    "판다",
+    "펭귄",
+    "다람쥐",
+    "고슴도치",
+    "호랑이",
+    "사자",
+    "곰",
+    "늑대",
+    "알파카",
+    "부엉이",
+    "참새",
+    "독수리",
+    "햄스터",
+    "쿼카",
+]
+
+
+def generate_random_chat_nickname(
+    room_code: str = "",
+) -> str:
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    existing_nicknames = set()
+
+    if normalized_room_code:
+        with db_connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT nickname
+                FROM members
+                WHERE room_code = ?
+                """,
+                (normalized_room_code,),
+            ).fetchall()
+
+        existing_nicknames = {
+            str(row["nickname"] or "").strip()
+            for row in rows
+        }
+
+    for _ in range(100):
+        nickname = (
+            f"{secrets.choice(RANDOM_NICKNAME_FOODS)} "
+            f"먹는 "
+            f"{secrets.choice(RANDOM_NICKNAME_ANIMALS)}"
+        )
+
+        if nickname not in existing_nicknames:
+            return nickname[:20]
+
+    fallback_number = secrets.randbelow(90) + 10
+
+    return (
+        f"{secrets.choice(RANDOM_NICKNAME_FOODS)} "
+        f"먹는 "
+        f"{secrets.choice(RANDOM_NICKNAME_ANIMALS)}"
+        f" {fallback_number}"
+    )[:20]
+
+
 def generate_room_code() -> str:
     alphabet = (
         "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -1806,14 +1905,6 @@ HOME_HTML = """
       >
         <h2>새 방 만들기</h2>
 
-        <label>채팅에서 사용할 닉네임</label>
-
-        <input
-          name="nickname"
-          maxlength="20"
-          required
-        >
-
         <label>본인 카카오톡 닉네임</label>
 
         <input
@@ -1839,14 +1930,6 @@ HOME_HTML = """
         <input
           name="room_code"
           maxlength="6"
-          required
-        >
-
-        <label>채팅에서 사용할 닉네임</label>
-
-        <input
-          name="nickname"
-          maxlength="20"
           required
         >
 
@@ -3627,27 +3710,24 @@ def create_room():
             ),
         ), 403
 
-    nickname = request.form.get(
-        "nickname",
-        "",
-    ).strip()[:20]
-
     kakao_nickname = request.form.get(
         "kakao_nickname",
         "",
     ).strip()[:30]
 
-    if not nickname or not kakao_nickname:
+    if not kakao_nickname:
         return render_template_string(
             HOME_HTML,
             error=(
-                "채팅 닉네임과 "
                 "카카오톡 닉네임을 "
-                "모두 입력해줘."
+                "입력해줘."
             ),
         )
 
     room_code = generate_room_code()
+    nickname = generate_random_chat_nickname(
+        room_code
+    )
     user_token = generate_user_token()
     created_at = now_kst_iso()
 
@@ -3727,11 +3807,6 @@ def join_room():
         "",
     ).upper().strip()
 
-    nickname = request.form.get(
-        "nickname",
-        "",
-    ).strip()[:20]
-
     kakao_nickname = request.form.get(
         "kakao_nickname",
         "",
@@ -3739,14 +3814,12 @@ def join_room():
 
     if (
         not room_code
-        or not nickname
         or not kakao_nickname
     ):
         return render_template_string(
             HOME_HTML,
             error=(
-                "방 코드, 채팅 닉네임, "
-                "카카오톡 닉네임을 "
+                "방 코드와 카카오톡 닉네임을 "
                 "모두 입력해줘."
             ),
         )
@@ -3786,6 +3859,10 @@ def join_room():
             HOME_HTML,
             error="이미 두 명이 입장한 방이야.",
         )
+
+    nickname = generate_random_chat_nickname(
+        room_code
+    )
 
     user_token = generate_user_token()
     joined_at = now_kst_iso()
