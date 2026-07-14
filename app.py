@@ -41,7 +41,8 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 KST = timezone(timedelta(hours=9))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me")
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "1234"
 
 # 두 명이 모두 입장한 시점부터 유지되는 채팅 시간
 ROOM_SESSION_MINUTES = 10
@@ -235,6 +236,12 @@ def init_db() -> None:
                 selected_at TEXT NOT NULL,
                 PRIMARY KEY(room_code, user_token)
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -336,6 +343,54 @@ def now_kst_iso() -> str:
     return datetime.now(KST).isoformat(
         timespec="seconds"
     )
+
+
+def get_public_entry_enabled() -> bool:
+    with db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT setting_value
+            FROM app_settings
+            WHERE setting_key = 'public_entry_enabled'
+            """
+        ).fetchone()
+
+    if row is None:
+        return True
+
+    return str(
+        row["setting_value"]
+    ).strip() != "0"
+
+
+def set_public_entry_enabled(
+    enabled: bool,
+) -> None:
+    setting_value = "1" if enabled else "0"
+
+    with db_connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings(
+                setting_key,
+                setting_value,
+                updated_at
+            )
+            VALUES (
+                'public_entry_enabled',
+                ?,
+                ?
+            )
+            ON CONFLICT(setting_key)
+            DO UPDATE SET
+                setting_value = excluded.setting_value,
+                updated_at = excluded.updated_at
+            """,
+            (
+                setting_value,
+                now_kst_iso(),
+            ),
+        )
 
 
 def delete_room_completely(
@@ -2994,11 +3049,21 @@ ADMIN_LOGIN_HTML = """
         </div>
       {% endif %}
 
+      <label>아이디</label>
+
+      <input
+        type="text"
+        name="username"
+        autocomplete="username"
+        required
+      >
+
       <label>비밀번호</label>
 
       <input
         type="password"
         name="password"
+        autocomplete="current-password"
         required
       >
 
@@ -3047,6 +3112,82 @@ ADMIN_HTML = """
         </button>
       </form>
     </header>
+
+    <section class="card">
+      <h2>서버 상태</h2>
+
+      <p class="muted">
+        관리자 페이지가 열려 있는 동안
+        5초마다 /health를 자동 호출해.
+      </p>
+
+      <div
+        id="health-summary"
+        class="alert"
+      >
+        서버 상태 확인 중...
+      </div>
+
+      <pre
+        id="health-details"
+        class="small"
+        style="margin:0; white-space:pre-wrap; overflow-wrap:anywhere;"
+      ></pre>
+    </section>
+
+    <section class="card">
+      <h2>상대방 입장 모드</h2>
+
+      {% if public_entry_enabled %}
+        <div class="alert success">
+          현재 상태: 입장 가능
+        </div>
+
+        <p class="muted">
+          상대방이 방 코드를 입력해 채팅방에 입장할 수 있어.
+        </p>
+
+        <form
+          method="post"
+          action="{{ url_for('admin_set_admission_mode') }}"
+          onsubmit="return confirm('상대방의 신규 입장을 차단할까? 이미 입장한 사용자는 계속 대화할 수 있어.');"
+        >
+          <input
+            type="hidden"
+            name="enabled"
+            value="0"
+          >
+
+          <button class="full" type="submit">
+            입장 불가능으로 전환
+          </button>
+        </form>
+      {% else %}
+        <div class="alert error">
+          현재 상태: 입장 불가능
+        </div>
+
+        <p class="muted">
+          상대방이 방 코드를 입력해도 새로 입장할 수 없어.
+          관리자 입장과 기존 접속자는 유지돼.
+        </p>
+
+        <form
+          method="post"
+          action="{{ url_for('admin_set_admission_mode') }}"
+        >
+          <input
+            type="hidden"
+            name="enabled"
+            value="1"
+          >
+
+          <button class="primary full" type="submit">
+            입장 가능으로 전환
+          </button>
+        </form>
+      {% endif %}
+    </section>
 
     <section class="card">
       <h2>시간 제한 없는 관리자 방</h2>
@@ -3184,6 +3325,95 @@ ADMIN_HTML = """
       </div>
     </section>
   </main>
+
+<script>
+const healthSummaryElement =
+  document.getElementById(
+    "health-summary"
+  );
+
+const healthDetailsElement =
+  document.getElementById(
+    "health-details"
+  );
+
+let healthRequestRunning = false;
+
+function formatHealthTime() {
+  return new Intl.DateTimeFormat(
+    "ko-KR",
+    {
+      dateStyle: "medium",
+      timeStyle: "medium"
+    }
+  ).format(new Date());
+}
+
+async function refreshHealth() {
+  if (healthRequestRunning) {
+    return;
+  }
+
+  healthRequestRunning = true;
+
+  try {
+    const response = await fetch(
+      "/health",
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          "Accept": "application/json"
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message
+        || `HTTP ${response.status}`
+      );
+    }
+
+    healthSummaryElement.className =
+      "alert success";
+
+    healthSummaryElement.textContent =
+      `정상 · ${formatHealthTime()}`;
+
+    healthDetailsElement.textContent =
+      JSON.stringify(
+        data,
+        null,
+        2
+      );
+
+  } catch (error) {
+    healthSummaryElement.className =
+      "alert error";
+
+    healthSummaryElement.textContent =
+      `연결 실패 · ${formatHealthTime()}`;
+
+    healthDetailsElement.textContent =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+  } finally {
+    healthRequestRunning = false;
+  }
+}
+
+refreshHealth();
+
+setInterval(
+  refreshHealth,
+  5000
+);
+</script>
 </body>
 </html>
 """
@@ -3280,6 +3510,15 @@ def create_room():
     methods=["POST"],
 )
 def join_room():
+    if not get_public_entry_enabled():
+        return render_template_string(
+            HOME_HTML,
+            error=(
+                "현재 관리자가 상대방 입장을 "
+                "일시적으로 차단했어."
+            ),
+        ), 403
+
     room_code = request.form.get(
         "room_code",
         "",
@@ -4255,14 +4494,33 @@ def admin_login():
     error = None
 
     if request.method == "POST":
+        username = request.form.get(
+            "username",
+            "",
+        ).strip()
+
         password = request.form.get(
             "password",
             "",
         )
 
-        if secrets.compare_digest(
-            password,
-            ADMIN_PASSWORD,
+        username_matches = (
+            secrets.compare_digest(
+                username,
+                ADMIN_USERNAME,
+            )
+        )
+
+        password_matches = (
+            secrets.compare_digest(
+                password,
+                ADMIN_PASSWORD,
+            )
+        )
+
+        if (
+            username_matches
+            and password_matches
         ):
             session[
                 "admin_authenticated"
@@ -4272,7 +4530,10 @@ def admin_login():
                 url_for("admin_dashboard")
             )
 
-        error = "비밀번호가 맞지 않아."
+        error = (
+            "아이디 또는 비밀번호가 "
+            "맞지 않아."
+        )
 
     return render_template_string(
         ADMIN_LOGIN_HTML,
@@ -4292,6 +4553,31 @@ def admin_logout():
 
     return redirect(
         url_for("admin_login")
+    )
+
+
+@app.route(
+    "/admin/admission-mode",
+    methods=["POST"],
+)
+@admin_required
+def admin_set_admission_mode():
+    enabled_value = request.form.get(
+        "enabled",
+        "",
+    ).strip()
+
+    if enabled_value not in {"0", "1"}:
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    set_public_entry_enabled(
+        enabled_value == "1"
+    )
+
+    return redirect(
+        url_for("admin_dashboard")
     )
 
 
@@ -4490,6 +4776,9 @@ def admin_dashboard():
         blocked=blocked,
         rooms=rooms,
         db_path=DB_PATH,
+        public_entry_enabled=(
+            get_public_entry_enabled()
+        ),
     )
 
 
@@ -4511,5 +4800,8 @@ def health():
             "upload_dir": UPLOAD_DIR,
             "ocr_loaded": False,
             "ocr_concurrency": 0,
+            "public_entry_enabled": (
+                get_public_entry_enabled()
+            ),
         }
     )
