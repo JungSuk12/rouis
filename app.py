@@ -1972,6 +1972,33 @@ CHAT_HTML = """
       </a>
     </header>
 
+    {% if is_admin_owner %}
+    <section
+      id="admin-admission-panel"
+      class="card"
+      style="padding:14px; margin:0;"
+    >
+      <div class="header" style="align-items:center;">
+        <div>
+          <strong>일반 사용자 이용 설정</strong>
+          <div
+            id="admin-admission-status"
+            class="muted small"
+          >
+            상태 확인 중...
+          </div>
+        </div>
+
+        <button
+          id="admin-admission-toggle"
+          type="button"
+        >
+          불러오는 중...
+        </button>
+      </div>
+    </section>
+    {% endif %}
+
     <section
       id="choice-bar"
       aria-label="상대 선택"
@@ -2074,6 +2101,8 @@ CHAT_HTML = """
 const roomCode = "{{ room_code }}";
 const initialToken = "{{ user_token }}";
 const isAdminRoom = {{ "true" if is_admin_room else "false" }};
+const isAdminOwner = {{ "true" if is_admin_owner else "false" }};
+let publicEntryEnabled = {{ "true" if public_entry_enabled else "false" }};
 const tokenStorageKey = `contact_guard_token_${roomCode}`;
 const connectionStorageKey =
   `contact_guard_connection_${roomCode}`;
@@ -2292,6 +2321,127 @@ document.addEventListener(
     }
   }
 );
+
+const adminAdmissionStatus =
+  document.getElementById(
+    "admin-admission-status"
+  );
+
+const adminAdmissionToggle =
+  document.getElementById(
+    "admin-admission-toggle"
+  );
+
+function renderAdminAdmissionState() {
+  if (
+    !isAdminOwner
+    || !adminAdmissionStatus
+    || !adminAdmissionToggle
+  ) {
+    return;
+  }
+
+  if (publicEntryEnabled) {
+    adminAdmissionStatus.textContent =
+      "현재 일반 사용자 이용 가능";
+
+    adminAdmissionToggle.textContent =
+      "일반 사용자 이용 비활성화";
+
+    adminAdmissionToggle.className = "";
+  } else {
+    adminAdmissionStatus.textContent =
+      "현재 일반 사용자 이용 불가능";
+
+    adminAdmissionToggle.textContent =
+      "일반 사용자 이용 활성화";
+
+    adminAdmissionToggle.className =
+      "primary";
+  }
+}
+
+async function toggleAdminAdmissionMode() {
+  if (!isAdminOwner || !adminAdmissionToggle) {
+    return;
+  }
+
+  const nextEnabled = !publicEntryEnabled;
+
+  const confirmed = window.confirm(
+    nextEnabled
+      ? "일반 사용자의 새 방 만들기와 방 참여를 활성화할까?"
+      : "일반 사용자의 새 방 만들기와 방 참여를 비활성화할까?"
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  adminAdmissionToggle.disabled = true;
+
+  try {
+    const response = await fetch(
+      `/api/admin-room/${roomCode}/admission-mode`,
+      {
+        method: "POST",
+        headers: authenticatedHeaders(
+          {
+            "Content-Type":
+              "application/json"
+          }
+        ),
+        body: JSON.stringify(
+          {
+            enabled: nextEnabled
+          }
+        )
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      showNotice(
+        data.message
+        || "입장 설정을 변경하지 못했어."
+      );
+      return;
+    }
+
+    publicEntryEnabled = Boolean(
+      data.public_entry_enabled
+    );
+
+    renderAdminAdmissionState();
+
+    showNotice(
+      publicEntryEnabled
+        ? "일반 사용자 이용을 활성화했어."
+        : "일반 사용자 이용을 비활성화했어.",
+      true
+    );
+
+  } catch (error) {
+    console.error(error);
+
+    showNotice(
+      "입장 설정 변경 중 오류가 발생했어."
+    );
+
+  } finally {
+    adminAdmissionToggle.disabled = false;
+  }
+}
+
+if (adminAdmissionToggle) {
+  adminAdmissionToggle.addEventListener(
+    "click",
+    toggleAdminAdmissionMode
+  );
+
+  renderAdminAdmissionState();
+}
 
 function authenticatedHeaders(extra = {}) {
   return {
@@ -3136,60 +3286,6 @@ ADMIN_HTML = """
     </section>
 
     <section class="card">
-      <h2>상대방 입장 모드</h2>
-
-      {% if public_entry_enabled %}
-        <div class="alert success">
-          현재 상태: 입장 가능
-        </div>
-
-        <p class="muted">
-          상대방이 방 코드를 입력해 채팅방에 입장할 수 있어.
-        </p>
-
-        <form
-          method="post"
-          action="{{ url_for('admin_set_admission_mode') }}"
-          onsubmit="return confirm('상대방의 신규 입장을 차단할까? 이미 입장한 사용자는 계속 대화할 수 있어.');"
-        >
-          <input
-            type="hidden"
-            name="enabled"
-            value="0"
-          >
-
-          <button class="full" type="submit">
-            입장 불가능으로 전환
-          </button>
-        </form>
-      {% else %}
-        <div class="alert error">
-          현재 상태: 입장 불가능
-        </div>
-
-        <p class="muted">
-          상대방이 방 코드를 입력해도 새로 입장할 수 없어.
-          관리자 입장과 기존 접속자는 유지돼.
-        </p>
-
-        <form
-          method="post"
-          action="{{ url_for('admin_set_admission_mode') }}"
-        >
-          <input
-            type="hidden"
-            name="enabled"
-            value="1"
-          >
-
-          <button class="primary full" type="submit">
-            입장 가능으로 전환
-          </button>
-        </form>
-      {% endif %}
-    </section>
-
-    <section class="card">
       <h2>시간 제한 없는 관리자 방</h2>
 
       <p class="muted">
@@ -3437,6 +3533,15 @@ def home():
     methods=["POST"],
 )
 def create_room():
+    if not get_public_entry_enabled():
+        return render_template_string(
+            HOME_HTML,
+            error=(
+                "현재 방 만들기가 "
+                "활성화되지 않았습니다."
+            ),
+        ), 403
+
     nickname = request.form.get(
         "nickname",
         "",
@@ -3514,8 +3619,8 @@ def join_room():
         return render_template_string(
             HOME_HTML,
             error=(
-                "현재 관리자가 상대방 입장을 "
-                "일시적으로 차단했어."
+                "현재 방 참여가 "
+                "활성화되지 않았습니다."
             ),
         ), 403
 
@@ -3634,7 +3739,9 @@ def chat_room(room_code: str):
     with db_connect() as connection:
         room = connection.execute(
             """
-            SELECT is_admin_room
+            SELECT
+                is_admin_room,
+                admin_token
             FROM rooms
             WHERE room_code = ?
             """,
@@ -3644,6 +3751,13 @@ def chat_room(room_code: str):
     is_admin_room = bool(
         room
         and int(room["is_admin_room"] or 0) == 1
+    )
+
+    is_admin_owner = bool(
+        is_admin_room
+        and room
+        and str(room["admin_token"] or "")
+        == user_token
     )
 
     is_expired, _ = get_room_time_state(
@@ -3661,6 +3775,81 @@ def chat_room(room_code: str):
         nickname=member["nickname"],
         user_token=user_token,
         is_admin_room=is_admin_room,
+        is_admin_owner=is_admin_owner,
+        public_entry_enabled=(
+            get_public_entry_enabled()
+        ),
+    )
+
+
+# =========================================================
+# 관리자 방 입장 모드 API
+# =========================================================
+
+@app.route(
+    "/api/admin-room/<room_code>/admission-mode",
+    methods=["POST"],
+)
+def admin_room_admission_mode(room_code: str):
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    user_token = get_request_user_token()
+
+    with db_connect() as connection:
+        room = connection.execute(
+            """
+            SELECT admin_token
+            FROM rooms
+            WHERE room_code = ?
+              AND is_admin_room = 1
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    if (
+        room is None
+        or not user_token
+        or user_token
+        != str(room["admin_token"] or "")
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "관리자 방 권한을 "
+                    "확인할 수 없어."
+                ),
+            }
+        ), 403
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    enabled = data.get("enabled")
+
+    if not isinstance(enabled, bool):
+        return jsonify(
+            {
+                "ok": False,
+                "message": (
+                    "입장 설정 값이 "
+                    "올바르지 않아."
+                ),
+            }
+        ), 400
+
+    set_public_entry_enabled(enabled)
+
+    return jsonify(
+        {
+            "ok": True,
+            "public_entry_enabled": (
+                get_public_entry_enabled()
+            ),
+        }
     )
 
 
