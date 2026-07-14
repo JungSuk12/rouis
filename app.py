@@ -1972,7 +1972,7 @@ CHAT_HTML = """
       </a>
     </header>
 
-    {% if is_admin_owner %}
+    {% if is_admin_control %}
     <section
       id="admin-admission-panel"
       class="card"
@@ -1980,7 +1980,7 @@ CHAT_HTML = """
     >
       <div class="header" style="align-items:center;">
         <div>
-          <strong>일반 사용자 이용 설정</strong>
+          <strong>전체 서버 일반 사용자 이용 설정</strong>
           <div
             id="admin-admission-status"
             class="muted small"
@@ -2343,18 +2343,18 @@ function renderAdminAdmissionState() {
 
   if (publicEntryEnabled) {
     adminAdmissionStatus.textContent =
-      "현재 일반 사용자 이용 가능";
+      "현재 일반 사용자의 새 방 만들기와 방 참여가 가능해.";
 
     adminAdmissionToggle.textContent =
-      "일반 사용자 이용 비활성화";
+      "전체 서버 신규 이용 막기";
 
     adminAdmissionToggle.className = "";
   } else {
     adminAdmissionStatus.textContent =
-      "현재 일반 사용자 이용 불가능";
+      "현재 일반 사용자의 새 방 만들기와 방 참여가 차단됐어.";
 
     adminAdmissionToggle.textContent =
-      "일반 사용자 이용 활성화";
+      "전체 서버 신규 이용 열기";
 
     adminAdmissionToggle.className =
       "primary";
@@ -3760,6 +3760,17 @@ def chat_room(room_code: str):
         == user_token
     )
 
+    # 관리자 로그인 세션으로 관리자 방을 연 경우에도
+    # 서버 운영 버튼이 확실히 보이도록 한다.
+    is_admin_control = bool(
+        is_admin_room
+        and (
+            is_admin_owner
+            or session.get("admin_logged_in")
+            is True
+        )
+    )
+
     is_expired, _ = get_room_time_state(
         normalized_room_code
     )
@@ -3776,6 +3787,7 @@ def chat_room(room_code: str):
         user_token=user_token,
         is_admin_room=is_admin_room,
         is_admin_owner=is_admin_owner,
+        is_admin_control=is_admin_control,
         public_entry_enabled=(
             get_public_entry_enabled()
         ),
