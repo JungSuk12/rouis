@@ -242,6 +242,15 @@ def init_db() -> None:
                 setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS status_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                room_code TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -343,6 +352,40 @@ def now_kst_iso() -> str:
     return datetime.now(KST).isoformat(
         timespec="seconds"
     )
+
+
+def write_status_log(
+    event_type: str,
+    status: str,
+    message: str,
+    room_code: str = "",
+) -> None:
+    try:
+        with db_connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO status_logs(
+                    event_type,
+                    room_code,
+                    status,
+                    message,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type[:50],
+                    room_code.upper().strip()[:20],
+                    status[:20],
+                    message[:500],
+                    now_kst_iso(),
+                ),
+            )
+    except Exception as error:
+        print(
+            f"[STATUS LOG] write failed: {error}",
+            flush=True,
+        )
 
 
 def get_public_entry_enabled() -> bool:
@@ -3388,6 +3431,42 @@ ADMIN_HTML = """
     </section>
 
     <section class="card">
+      <h2>상태 로그</h2>
+
+      <p class="muted">
+        채팅 내용이 아니라 접속, 거부, 만료, 예외처리 작동 여부만 표시해.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <tr>
+            <th>시간</th>
+            <th>이벤트</th>
+            <th>방</th>
+            <th>상태</th>
+            <th>내용</th>
+          </tr>
+
+          {% for row in status_logs %}
+            <tr>
+              <td>{{ row.created_at }}</td>
+              <td>{{ row.event_type }}</td>
+              <td>{{ row.room_code or '-' }}</td>
+              <td>{{ row.status }}</td>
+              <td>{{ row.message }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="5">
+                상태 로그가 없어.
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>차단 기록</h2>
 
       <div class="table-wrap">
@@ -3534,6 +3613,12 @@ def home():
 )
 def create_room():
     if not get_public_entry_enabled():
+        write_status_log(
+            "ROOM_CREATE",
+            "BLOCKED",
+            "신규 방 생성 차단 예외처리가 작동했어.",
+        )
+
         return render_template_string(
             HOME_HTML,
             error=(
@@ -3601,6 +3686,13 @@ def create_room():
             ),
         )
 
+    write_status_log(
+        "ROOM_CREATE",
+        "SUCCESS",
+        "일반 방이 생성됐어.",
+        room_code,
+    )
+
     return redirect(
         url_for(
             "chat_room",
@@ -3616,6 +3708,12 @@ def create_room():
 )
 def join_room():
     if not get_public_entry_enabled():
+        write_status_log(
+            "ROOM_JOIN",
+            "BLOCKED",
+            "신규 참여 차단 예외처리가 작동했어.",
+        )
+
         return render_template_string(
             HOME_HTML,
             error=(
@@ -3664,12 +3762,26 @@ def join_room():
         ).fetchone()
 
     if not room:
+        write_status_log(
+            "ROOM_JOIN",
+            "REJECTED",
+            "존재하지 않는 방 코드로 참여를 시도했어.",
+            room_code,
+        )
+
         return render_template_string(
             HOME_HTML,
             error="존재하지 않는 방 코드야.",
         )
 
     if room_member_count(room_code) >= 2:
+        write_status_log(
+            "ROOM_JOIN",
+            "REJECTED",
+            "이미 두 명이 입장한 방이라 참여를 거부했어.",
+            room_code,
+        )
+
         return render_template_string(
             HOME_HTML,
             error="이미 두 명이 입장한 방이야.",
@@ -3698,6 +3810,13 @@ def join_room():
                 joined_at,
             ),
         )
+
+    write_status_log(
+        "ROOM_JOIN",
+        "SUCCESS",
+        "상대방이 방에 참여했어.",
+        room_code,
+    )
 
     start_room_session_if_ready(
         room_code
@@ -3766,7 +3885,7 @@ def chat_room(room_code: str):
         is_admin_room
         and (
             is_admin_owner
-            or session.get("admin_logged_in")
+            or session.get("admin_authenticated")
             is True
         )
     )
@@ -3886,6 +4005,13 @@ def reconnect_status(room_code: str):
     )
 
     if member is None:
+        write_status_log(
+            "CONNECTION",
+            "UNAUTHORIZED",
+            "채팅방 인증 만료로 접속을 거부했어.",
+            normalized_room_code,
+        )
+
         return jsonify(
             {
                 "ok": True,
@@ -3956,6 +4082,13 @@ def connect_room_screen(room_code: str):
     )
 
     if is_expired:
+        write_status_log(
+            "CONNECTION",
+            "EXPIRED",
+            "10분 세션 종료로 접속을 거부했어.",
+            normalized_room_code,
+        )
+
         return jsonify(
             {
                 "ok": False,
@@ -3969,6 +4102,13 @@ def connect_room_screen(room_code: str):
         ), 410
 
     if not connection_id:
+        write_status_log(
+            "CONNECTION",
+            "REJECTED",
+            "접속 화면 ID가 없어 연결을 거부했어.",
+            normalized_room_code,
+        )
+
         return jsonify(
             {
                 "ok": False,
@@ -3984,6 +4124,13 @@ def connect_room_screen(room_code: str):
         user_token,
         connection_id,
     ):
+        write_status_log(
+            "CONNECTION",
+            "LIMIT",
+            "동시 접속 화면 2개 제한 예외처리가 작동했어.",
+            normalized_room_code,
+        )
+
         return jsonify(
             {
                 "ok": False,
@@ -3994,6 +4141,13 @@ def connect_room_screen(room_code: str):
                 ),
             }
         ), 409
+
+    write_status_log(
+        "CONNECTION",
+        "CONNECTED",
+        "채팅 화면 연결이 확인됐어.",
+        normalized_room_code,
+    )
 
     return jsonify(
         {
@@ -4025,6 +4179,13 @@ def disconnect_room_screen(room_code: str):
     remove_active_connection(
         normalized_room_code,
         str(connection_id).strip(),
+    )
+
+    write_status_log(
+        "CONNECTION",
+        "DISCONNECTED",
+        "채팅 화면 연결 해제 신호를 받았어.",
+        normalized_room_code,
     )
 
     return jsonify(
@@ -4424,6 +4585,14 @@ def send_message(room_code: str):
                 ),
             )
 
+        write_status_log(
+            "CONTACT_FILTER",
+            "BLOCKED",
+            "텍스트 연락처 차단 예외처리가 작동했어: "
+            + ", ".join(reasons),
+            room_code,
+        )
+
         return jsonify(
             {
                 "ok": False,
@@ -4516,6 +4685,13 @@ def send_image(room_code: str):
         reasons = []
 
     except ValueError as error:
+        write_status_log(
+            "IMAGE_PROCESS",
+            "REJECTED",
+            "이미지 유효성 예외처리가 작동했어: " + str(error),
+            room_code,
+        )
+
         if image_path:
             try:
                 Path(
@@ -4536,7 +4712,14 @@ def send_image(room_code: str):
             }
         ), 400
 
-    except Exception:
+    except Exception as error:
+        write_status_log(
+            "IMAGE_PROCESS",
+            "ERROR",
+            "이미지 처리 예외가 발생했어: " + str(error),
+            room_code,
+        )
+
         import traceback
 
         traceback.print_exc()
@@ -4773,8 +4956,20 @@ def admin_set_admission_mode():
             url_for("admin_dashboard")
         )
 
+    enabled = enabled_value == "1"
+
     set_public_entry_enabled(
-        enabled_value == "1"
+        enabled
+    )
+
+    write_status_log(
+        "ADMIN_MODE",
+        "ON" if enabled else "OFF",
+        (
+            "일반 사용자 신규 이용을 허용했어."
+            if enabled
+            else "일반 사용자 신규 이용을 차단했어."
+        ),
     )
 
     return redirect(
@@ -4845,6 +5040,13 @@ def admin_create_room():
             ),
         )
 
+    write_status_log(
+        "ADMIN_ROOM",
+        "CREATED",
+        "관리자 방이 생성됐어.",
+        room_code,
+    )
+
     return redirect(
         url_for(
             "chat_room",
@@ -4879,6 +5081,28 @@ def admin_open_room(room_code: str):
         return redirect(
             url_for("admin_dashboard")
         )
+
+    # 관리자 방 재입장 시 이전 관리자 화면의 접속 기록을 제거한다.
+    # 새 탭이나 즉시 재입장도 세 번째 화면으로 오인하지 않는다.
+    with db_connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM active_connections
+            WHERE room_code = ?
+              AND user_token = ?
+            """,
+            (
+                normalized_room_code,
+                str(room["admin_token"]),
+            ),
+        )
+
+    write_status_log(
+        "ADMIN_ROOM",
+        "REENTRY",
+        "관리자 방 재입장 예외처리가 작동했어.",
+        normalized_room_code,
+    )
 
     return redirect(
         url_for(
@@ -4931,6 +5155,20 @@ def admin_dashboard():
     cleanup_expired_normal_rooms()
 
     with db_connect() as connection:
+        status_logs = connection.execute(
+            """
+            SELECT
+                event_type,
+                room_code,
+                status,
+                message,
+                created_at
+            FROM status_logs
+            ORDER BY id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+
         blocked = connection.execute(
             """
             SELECT
@@ -4974,6 +5212,7 @@ def admin_dashboard():
 
     return render_template_string(
         ADMIN_HTML,
+        status_logs=status_logs,
         blocked=blocked,
         rooms=rooms,
         db_path=DB_PATH,
