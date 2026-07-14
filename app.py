@@ -1470,30 +1470,6 @@ def require_room_member_api(view):
             room_code.upper().strip()
         )
 
-        if (
-            not get_public_entry_enabled()
-            and not is_admin_room_code(
-                normalized_room_code
-            )
-        ):
-            write_status_log(
-                "SERVICE_MODE",
-                "BLOCKED",
-                "서비스 OFF 상태에서 일반 방 API 이용을 차단했어.",
-                normalized_room_code,
-            )
-
-            return jsonify(
-                {
-                    "ok": False,
-                    "service_disabled": True,
-                    "message": (
-                        "현재 서비스 이용이 "
-                        "비활성화되었습니다."
-                    ),
-                }
-            ), 503
-
         user_token = (
             get_request_user_token()
         )
@@ -2517,15 +2493,15 @@ function renderAdminAdmissionState() {
       "현재 서비스 ON · 일반 사용자가 이용할 수 있어.";
 
     adminAdmissionToggle.textContent =
-      "전체 서버 이용 OFF";
+      "신규 진입 OFF";
 
     adminAdmissionToggle.className = "";
   } else {
     adminAdmissionStatus.textContent =
-      "현재 서비스 OFF · 관리자만 이용할 수 있어.";
+      "현재 신규 방 생성·참여만 차단 중이야. 기존 채팅은 계속 이용할 수 있어.";
 
     adminAdmissionToggle.textContent =
-      "전체 서버 이용 ON";
+      "신규 진입 ON";
 
     adminAdmissionToggle.className =
       "primary";
@@ -2588,8 +2564,8 @@ async function toggleAdminAdmissionMode() {
 
     showNotice(
       publicEntryEnabled
-        ? "전체 서버 일반 사용자 이용을 ON으로 바꿨어."
-        : "전체 서버 일반 사용자 이용을 OFF로 바꿨어.",
+        ? "신규 방 생성과 신규 참여를 허용했어."
+        : "신규 방 생성과 신규 참여를 차단했어. 기존 채팅은 유지돼.",
       true
     );
 
@@ -3993,25 +3969,6 @@ def chat_room(room_code: str):
         room
         and int(room["is_admin_room"] or 0) == 1
     )
-
-    if (
-        not get_public_entry_enabled()
-        and not is_admin_room
-    ):
-        write_status_log(
-            "SERVICE_MODE",
-            "BLOCKED",
-            "서비스 OFF 상태에서 일반 방 화면 접속을 차단했어.",
-            normalized_room_code,
-        )
-
-        return render_template_string(
-            HOME_HTML,
-            error=(
-                "현재 서비스 이용이 "
-                "비활성화되었습니다."
-            ),
-        ), 503
 
     is_admin_owner = bool(
         is_admin_room
