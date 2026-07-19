@@ -4508,6 +4508,45 @@ def disconnect_room_screen(room_code: str):
 # 호감 선택 API
 # =========================================================
 
+def is_room_matched(
+    room_code: str,
+) -> bool:
+    """방의 실제 두 멤버가 모두 '마음에 듦'을 선택했는지 확인한다."""
+    normalized_room_code = (
+        room_code.upper().strip()
+    )
+
+    with db_connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(DISTINCT m.user_token) AS member_count,
+                COUNT(DISTINCT rc.user_token) AS choice_count,
+                SUM(
+                    CASE
+                        WHEN rc.choice = 'like' THEN 1
+                        ELSE 0
+                    END
+                ) AS like_count
+            FROM members m
+            LEFT JOIN room_choices rc
+              ON rc.room_code = m.room_code
+             AND rc.user_token = m.user_token
+            WHERE m.room_code = ?
+            """,
+            (normalized_room_code,),
+        ).fetchone()
+
+    if row is None:
+        return False
+
+    return (
+        int(row["member_count"] or 0) == 2
+        and int(row["choice_count"] or 0) == 2
+        and int(row["like_count"] or 0) == 2
+    )
+
+
 @app.route(
     "/api/room/<room_code>/choice",
     methods=["GET"],
@@ -4864,8 +4903,18 @@ def send_message(room_code: str):
     user_token = request.user_token
     created_at = now_kst_iso()
 
-    reasons = detect_contact_info(
-        content
+    # 두 사용자가 모두 "마음에 듦"을 선택한 뒤에는
+    # 연락처·링크·SNS ID 필터를 해제한다.
+    matched = is_room_matched(
+        room_code
+    )
+
+    reasons = (
+        []
+        if matched
+        else detect_contact_info(
+            content
+        )
     )
 
     if reasons:
@@ -4986,8 +5035,16 @@ def send_image(room_code: str):
         #     image_path
         # )
         #
-        # reasons = detect_contact_info(
-        #     ocr_text
+        # matched = is_room_matched(
+        #     room_code
+        # )
+        #
+        # reasons = (
+        #     []
+        #     if matched
+        #     else detect_contact_info(
+        #         ocr_text
+        #     )
         # )
 
         ocr_text = ""
