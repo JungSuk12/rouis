@@ -2249,6 +2249,80 @@ HOME_HTML = """
   </main>
 
 <script>
+// 한글 IME에서는 maxlength만으로 조합 중 세 번째 글자가
+// 잠시 입력될 수 있어 실제 값도 직접 2글자로 제한한다.
+const kakaoNicknameInputs =
+  document.querySelectorAll(
+    'input[name="kakao_nickname"]'
+  );
+
+function normalizeKakaoNicknameInput(input) {
+  const hangulOnly = Array.from(
+    String(input.value || '')
+  )
+    .filter((character) =>
+      /^[가-힣]$/.test(character)
+    )
+    .slice(0, 2)
+    .join('');
+
+  if (input.value !== hangulOnly) {
+    input.value = hangulOnly;
+  }
+
+  if (hangulOnly.length === 0) {
+    input.setCustomValidity('');
+  } else if (hangulOnly.length !== 2) {
+    input.setCustomValidity(
+      '카카오톡 닉네임은 한글 2글자로 입력해줘.'
+    );
+  } else {
+    input.setCustomValidity('');
+  }
+}
+
+kakaoNicknameInputs.forEach((input) => {
+  input.maxLength = 2;
+  let isComposing = false;
+
+  input.addEventListener(
+    'compositionstart',
+    () => {
+      isComposing = true;
+    }
+  );
+
+  input.addEventListener(
+    'compositionend',
+    () => {
+      isComposing = false;
+      normalizeKakaoNicknameInput(input);
+    }
+  );
+
+  input.addEventListener(
+    'input',
+    () => {
+      if (!isComposing) {
+        normalizeKakaoNicknameInput(input);
+      }
+    }
+  );
+
+  input.form?.addEventListener(
+    'submit',
+    (event) => {
+      normalizeKakaoNicknameInput(input);
+
+      if (!/^[가-힣]{2}$/.test(input.value)) {
+        event.preventDefault();
+        input.reportValidity();
+        input.focus();
+      }
+    }
+  );
+});
+
 const pageScrollContainer =
   document.querySelector(
     "body > .page:not(.chat)"
