@@ -2249,17 +2249,88 @@ HOME_HTML = """
   </main>
 
 <script>
-// 카카오톡 닉네임 입력칸은 한 칸 그대로 사용한다.
-// 브라우저 기본 maxlength로 최대 2글자만 허용하고,
-// pattern 및 서버 검증으로 완성형 한글 2글자를 확인한다.
+// 한 칸 입력은 유지한다.
+// 한글 IME는 maxlength를 조합 중 우회할 수 있으므로,
+// 마지막으로 확인된 유효 상태를 저장하고 3음절이 되면 즉시 복구한다.
 document.querySelectorAll(
   'input[name="kakao_nickname"]'
 ).forEach((input) => {
+  let composing = false;
+  let lastValidValue = '';
+
+  const isCompletedHangulUpToTwo = (value) => {
+    return /^[가-힣]{0,2}$/.test(value);
+  };
+
+  const restoreLastValid = () => {
+    if (input.value === lastValidValue) {
+      return;
+    }
+
+    input.value = lastValidValue;
+
+    const end = input.value.length;
+    try {
+      input.setSelectionRange(end, end);
+    } catch (_error) {
+      // 일부 모바일 브라우저에서는 선택 범위 설정이 지원되지 않을 수 있다.
+    }
+  };
+
+  const validateCurrentValue = () => {
+    const value = input.value;
+
+    // 완성형 한글 0~2글자면 정상 상태로 저장한다.
+    // 예: 김처 -> 김철 -> 김첧 같은 두 번째 글자 내부 조합 변경은 허용된다.
+    if (isCompletedHangulUpToTwo(value)) {
+      lastValidValue = value;
+      input.setCustomValidity('');
+      return;
+    }
+
+    // 세 번째 음절, 영문, 숫자, 기호, 분리 자모가 최종값으로 남으면 원복한다.
+    restoreLastValid();
+  };
+
+  input.addEventListener('compositionstart', () => {
+    composing = true;
+  });
+
   input.addEventListener('input', () => {
-    input.setCustomValidity('');
+    // 조합 중에도 이미 3음절 이상으로 확정되어 들어온 경우 바로 복구한다.
+    if ([...input.value].length > 2) {
+      restoreLastValid();
+      return;
+    }
+
+    if (!composing) {
+      validateCurrentValue();
+    }
+  });
+
+  input.addEventListener('compositionend', () => {
+    composing = false;
+    validateCurrentValue();
+  });
+
+  input.addEventListener('paste', (event) => {
+    const pasted = event.clipboardData?.getData('text') ?? '';
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const candidate = (
+      input.value.slice(0, start)
+      + pasted
+      + input.value.slice(end)
+    );
+
+    if (!isCompletedHangulUpToTwo(candidate)) {
+      event.preventDefault();
+    }
   });
 
   input.form?.addEventListener('submit', (event) => {
+    validateCurrentValue();
+
     if (!/^[가-힣]{2}$/.test(input.value)) {
       input.setCustomValidity(
         '카카오톡 닉네임은 완성된 한글 2글자로 입력해줘.'
