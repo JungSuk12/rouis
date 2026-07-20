@@ -50,6 +50,12 @@ ROOM_SESSION_MINUTES = 10
 # 한 채팅방에서 동시에 유지할 수 있는 실제 접속 화면 수
 MAX_ACTIVE_CONNECTIONS = 2
 
+# 같은 카카오톡 닉네임의 일반 방 주간 입장 제한
+WEEKLY_KAKAO_ENTRY_LIMIT = 2
+
+# 카카오톡 닉네임은 한글 완성형 정확히 2글자만 허용
+KAKAO_NICKNAME_PATTERN = re.compile(r"^[가-힣]{2}$")
+
 # 브라우저 신호가 이 시간 동안 없으면 끊긴 접속으로 처리
 ACTIVE_CONNECTION_TIMEOUT_SECONDS = 8
 
@@ -235,6 +241,23 @@ def init_db() -> None:
                 choice TEXT NOT NULL,
                 selected_at TEXT NOT NULL,
                 PRIMARY KEY(room_code, user_token)
+            );
+
+            CREATE TABLE IF NOT EXISTS weekly_kakao_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kakao_nickname TEXT NOT NULL,
+                room_code TEXT NOT NULL,
+                user_token TEXT NOT NULL,
+                entered_at TEXT NOT NULL,
+                week_start TEXT NOT NULL,
+                UNIQUE(room_code, user_token)
+            );
+
+            CREATE INDEX IF NOT EXISTS
+            idx_weekly_kakao_entries_lookup
+            ON weekly_kakao_entries(
+                kakao_nickname,
+                week_start
             );
 
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -2178,7 +2201,11 @@ HOME_HTML = """
 
         <input
           name="kakao_nickname"
-          maxlength="30"
+          maxlength="2"
+          minlength="2"
+          pattern="[가-힣]{2}"
+          title="한글 2글자로 입력해줘."
+          autocomplete="off"
           required
         >
 
@@ -2206,7 +2233,11 @@ HOME_HTML = """
 
         <input
           name="kakao_nickname"
-          maxlength="30"
+          maxlength="2"
+          minlength="2"
+          pattern="[가-힣]{2}"
+          title="한글 2글자로 입력해줘."
+          autocomplete="off"
           required
         >
 
@@ -4330,6 +4361,117 @@ setInterval(
 
 
 # =========================================================
+# 카카오톡 닉네임 및 주간 입장 제한
+# =========================================================
+
+def normalize_kakao_nickname(value: str) -> str:
+    return str(value or "").strip()
+
+
+def is_valid_kakao_nickname(value: str) -> bool:
+    return bool(
+        KAKAO_NICKNAME_PATTERN.fullmatch(
+            normalize_kakao_nickname(value)
+        )
+    )
+
+
+def get_kst_week_start(
+    moment: datetime | None = None,
+) -> datetime:
+    """한국시간 일요일 00:00을 해당 주의 시작으로 반환한다."""
+    current = moment or datetime.now(KST)
+
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    else:
+        current = current.astimezone(KST)
+
+    # Python weekday: 월요일=0, 일요일=6
+    days_since_sunday = (
+        current.weekday() + 1
+    ) % 7
+
+    return (
+        current
+        - timedelta(days=days_since_sunday)
+    ).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def get_kst_week_start_iso() -> str:
+    return get_kst_week_start().isoformat()
+
+
+def get_weekly_kakao_entry_count(
+    connection: sqlite3.Connection,
+    kakao_nickname: str,
+    week_start: str,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS entry_count
+        FROM weekly_kakao_entries
+        WHERE kakao_nickname = ?
+          AND week_start = ?
+        """,
+        (
+            normalize_kakao_nickname(
+                kakao_nickname
+            ),
+            week_start,
+        ),
+    ).fetchone()
+
+    return int(row["entry_count"] or 0)
+
+
+def add_weekly_kakao_entry(
+    connection: sqlite3.Connection,
+    *,
+    kakao_nickname: str,
+    room_code: str,
+    user_token: str,
+    entered_at: str,
+    week_start: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO weekly_kakao_entries(
+            kakao_nickname,
+            room_code,
+            user_token,
+            entered_at,
+            week_start
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            normalize_kakao_nickname(
+                kakao_nickname
+            ),
+            room_code,
+            user_token,
+            entered_at,
+            week_start,
+        ),
+    )
+
+
+def weekly_limit_error_message() -> str:
+    return (
+        "같은 카카오톡 닉네임은 "
+        "한국시간 기준 한 주에 최대 2회만 "
+        "방을 만들거나 참여할 수 있어. "
+        "다음 일요일 00:00에 다시 이용할 수 있어."
+    )
+
+
+# =========================================================
 # 화면
 # =========================================================
 
@@ -4362,19 +4504,23 @@ def create_room():
             ),
         ), 403
 
-    kakao_nickname = request.form.get(
-        "kakao_nickname",
-        "",
-    ).strip()[:30]
+    kakao_nickname = normalize_kakao_nickname(
+        request.form.get(
+            "kakao_nickname",
+            "",
+        )
+    )
 
-    if not kakao_nickname:
+    if not is_valid_kakao_nickname(
+        kakao_nickname
+    ):
         return render_template_string(
             HOME_HTML,
             error=(
-                "카카오톡 닉네임을 "
-                "입력해줘."
+                "카카오톡 닉네임은 "
+                "한글 2글자로 입력해줘."
             ),
-        )
+        ), 400
 
     room_code = generate_room_code()
     nickname = generate_random_chat_nickname(
@@ -4382,41 +4528,100 @@ def create_room():
     )
     user_token = generate_user_token()
     created_at = now_kst_iso()
+    week_start = get_kst_week_start_iso()
 
-    with db_connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO rooms(
-                room_code,
-                created_at
+    try:
+        with db_connect() as connection:
+            # 같은 닉네임의 동시 요청도 2회를 넘지 않도록 쓰기 잠금
+            connection.execute("BEGIN IMMEDIATE")
+
+            entry_count = (
+                get_weekly_kakao_entry_count(
+                    connection,
+                    kakao_nickname,
+                    week_start,
+                )
             )
-            VALUES (?, ?)
-            """,
-            (
-                room_code,
-                created_at,
-            ),
+
+            if (
+                entry_count
+                >= WEEKLY_KAKAO_ENTRY_LIMIT
+            ):
+                connection.rollback()
+
+                write_status_log(
+                    "WEEKLY_ENTRY_LIMIT",
+                    "BLOCKED",
+                    (
+                        "주간 입장 횟수를 초과한 "
+                        "카카오톡 닉네임의 방 생성을 막았어."
+                    ),
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error=weekly_limit_error_message(),
+                ), 429
+
+            connection.execute(
+                """
+                INSERT INTO rooms(
+                    room_code,
+                    created_at
+                )
+                VALUES (?, ?)
+                """,
+                (
+                    room_code,
+                    created_at,
+                ),
+            )
+
+            connection.execute(
+                """
+                INSERT INTO members(
+                    room_code,
+                    user_token,
+                    nickname,
+                    kakao_nickname,
+                    joined_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    room_code,
+                    user_token,
+                    nickname,
+                    kakao_nickname,
+                    created_at,
+                ),
+            )
+
+            add_weekly_kakao_entry(
+                connection,
+                kakao_nickname=kakao_nickname,
+                room_code=room_code,
+                user_token=user_token,
+                entered_at=created_at,
+                week_start=week_start,
+            )
+
+    except sqlite3.Error:
+        write_status_log(
+            "ROOM_CREATE",
+            "ERROR",
+            "방 생성 중 데이터베이스 오류가 발생했어.",
+            room_code,
         )
 
-        connection.execute(
-            """
-            INSERT INTO members(
-                room_code,
-                user_token,
-                nickname,
-                kakao_nickname,
-                joined_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                room_code,
-                user_token,
-                nickname,
-                kakao_nickname,
-                created_at,
+        return render_template_string(
+            HOME_HTML,
+            error=(
+                "방을 만드는 중 오류가 발생했어. "
+                "잠시 후 다시 시도해줘."
             ),
-        )
+        ), 500
 
     write_status_log(
         "ROOM_CREATE",
@@ -4459,86 +4664,165 @@ def join_room():
         "",
     ).upper().strip()
 
-    kakao_nickname = request.form.get(
-        "kakao_nickname",
-        "",
-    ).strip()[:30]
+    kakao_nickname = normalize_kakao_nickname(
+        request.form.get(
+            "kakao_nickname",
+            "",
+        )
+    )
 
-    if (
-        not room_code
-        or not kakao_nickname
+    if not room_code:
+        return render_template_string(
+            HOME_HTML,
+            error="방 코드를 입력해줘.",
+        ), 400
+
+    if not is_valid_kakao_nickname(
+        kakao_nickname
     ):
         return render_template_string(
             HOME_HTML,
             error=(
-                "방 코드와 카카오톡 닉네임을 "
-                "모두 입력해줘."
+                "카카오톡 닉네임은 "
+                "한글 2글자로 입력해줘."
             ),
-        )
-
-    with db_connect() as connection:
-        room = connection.execute(
-            """
-            SELECT 1
-            FROM rooms
-            WHERE room_code = ?
-            """,
-            (room_code,),
-        ).fetchone()
-
-    if not room:
-        write_status_log(
-            "ROOM_JOIN",
-            "REJECTED",
-            "존재하지 않는 방 코드로 참여를 시도했어.",
-            room_code,
-        )
-
-        return render_template_string(
-            HOME_HTML,
-            error="존재하지 않는 방 코드야.",
-        )
-
-    if room_member_count(room_code) >= 2:
-        write_status_log(
-            "ROOM_JOIN",
-            "REJECTED",
-            "이미 두 명이 입장한 방이라 참여를 거부했어.",
-            room_code,
-        )
-
-        return render_template_string(
-            HOME_HTML,
-            error="이미 두 명이 입장한 방이야.",
-        )
+        ), 400
 
     nickname = generate_random_chat_nickname(
         room_code
     )
-
     user_token = generate_user_token()
     joined_at = now_kst_iso()
+    week_start = get_kst_week_start_iso()
 
-    with db_connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO members(
-                room_code,
-                user_token,
-                nickname,
-                kakao_nickname,
-                joined_at
+    try:
+        with db_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            room = connection.execute(
+                """
+                SELECT 1
+                FROM rooms
+                WHERE room_code = ?
+                """,
+                (room_code,),
+            ).fetchone()
+
+            if not room:
+                connection.rollback()
+
+                write_status_log(
+                    "ROOM_JOIN",
+                    "REJECTED",
+                    "존재하지 않는 방 코드로 참여를 시도했어.",
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error="존재하지 않는 방 코드야.",
+                ), 404
+
+            member_count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS member_count
+                FROM members
+                WHERE room_code = ?
+                """,
+                (room_code,),
+            ).fetchone()
+
+            if int(
+                member_count_row["member_count"]
+                or 0
+            ) >= 2:
+                connection.rollback()
+
+                write_status_log(
+                    "ROOM_JOIN",
+                    "REJECTED",
+                    "이미 두 명이 입장한 방이라 참여를 거부했어.",
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error="이미 두 명이 입장한 방이야.",
+                ), 409
+
+            entry_count = (
+                get_weekly_kakao_entry_count(
+                    connection,
+                    kakao_nickname,
+                    week_start,
+                )
             )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                room_code,
-                user_token,
-                nickname,
-                kakao_nickname,
-                joined_at,
-            ),
+
+            if (
+                entry_count
+                >= WEEKLY_KAKAO_ENTRY_LIMIT
+            ):
+                connection.rollback()
+
+                write_status_log(
+                    "WEEKLY_ENTRY_LIMIT",
+                    "BLOCKED",
+                    (
+                        "주간 입장 횟수를 초과한 "
+                        "카카오톡 닉네임의 방 참여를 막았어."
+                    ),
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error=weekly_limit_error_message(),
+                ), 429
+
+            connection.execute(
+                """
+                INSERT INTO members(
+                    room_code,
+                    user_token,
+                    nickname,
+                    kakao_nickname,
+                    joined_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    room_code,
+                    user_token,
+                    nickname,
+                    kakao_nickname,
+                    joined_at,
+                ),
+            )
+
+            add_weekly_kakao_entry(
+                connection,
+                kakao_nickname=kakao_nickname,
+                room_code=room_code,
+                user_token=user_token,
+                entered_at=joined_at,
+                week_start=week_start,
+            )
+
+    except sqlite3.Error:
+        write_status_log(
+            "ROOM_JOIN",
+            "ERROR",
+            "방 참여 중 데이터베이스 오류가 발생했어.",
+            room_code,
         )
+
+        return render_template_string(
+            HOME_HTML,
+            error=(
+                "방에 참여하는 중 오류가 발생했어. "
+                "잠시 후 다시 시도해줘."
+            ),
+        ), 500
 
     write_status_log(
         "ROOM_JOIN",
