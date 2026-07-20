@@ -2201,8 +2201,8 @@ HOME_HTML = """
 
         <input
           name="kakao_nickname"
-          maxlength="2"
           minlength="2"
+          maxlength="2"
           pattern="[가-힣]{2}"
           title="한글 2글자로 입력해줘."
           autocomplete="off"
@@ -2233,8 +2233,8 @@ HOME_HTML = """
 
         <input
           name="kakao_nickname"
-          maxlength="2"
           minlength="2"
+          maxlength="2"
           pattern="[가-힣]{2}"
           title="한글 2글자로 입력해줘."
           autocomplete="off"
@@ -2249,282 +2249,26 @@ HOME_HTML = """
   </main>
 
 <script>
-// 한글 IME에서는 maxlength만으로 조합 중 세 번째 글자가
-// 잠시 입력될 수 있어 실제 값도 직접 2글자로 제한한다.
-const kakaoNicknameInputs =
-  document.querySelectorAll(
-    'input[name="kakao_nickname"]'
-  );
-
-function normalizeKakaoNicknameInput(input) {
-  const hangulOnly = Array.from(
-    String(input.value || '')
-  )
-    .filter((character) =>
-      /^[가-힣]$/.test(character)
-    )
-    .slice(0, 2)
-    .join('');
-
-  if (input.value !== hangulOnly) {
-    input.value = hangulOnly;
-  }
-
-  if (hangulOnly.length === 0) {
+// 카카오톡 닉네임 입력칸은 한 칸 그대로 사용한다.
+// 브라우저 기본 maxlength로 최대 2글자만 허용하고,
+// pattern 및 서버 검증으로 완성형 한글 2글자를 확인한다.
+document.querySelectorAll(
+  'input[name="kakao_nickname"]'
+).forEach((input) => {
+  input.addEventListener('input', () => {
     input.setCustomValidity('');
-  } else if (hangulOnly.length !== 2) {
-    input.setCustomValidity(
-      '카카오톡 닉네임은 한글 2글자로 입력해줘.'
-    );
-  } else {
-    input.setCustomValidity('');
-  }
-}
+  });
 
-kakaoNicknameInputs.forEach((input) => {
-  input.maxLength = 2;
-  let isComposing = false;
-
-  input.addEventListener(
-    'compositionstart',
-    () => {
-      isComposing = true;
+  input.form?.addEventListener('submit', (event) => {
+    if (!/^[가-힣]{2}$/.test(input.value)) {
+      input.setCustomValidity(
+        '카카오톡 닉네임은 완성된 한글 2글자로 입력해줘.'
+      );
+      input.reportValidity();
+      event.preventDefault();
     }
-  );
-
-  input.addEventListener(
-    'compositionend',
-    () => {
-      isComposing = false;
-      normalizeKakaoNicknameInput(input);
-    }
-  );
-
-  input.addEventListener(
-    'input',
-    () => {
-      if (!isComposing) {
-        normalizeKakaoNicknameInput(input);
-      }
-    }
-  );
-
-  input.form?.addEventListener(
-    'submit',
-    (event) => {
-      normalizeKakaoNicknameInput(input);
-
-      if (!/^[가-힣]{2}$/.test(input.value)) {
-        event.preventDefault();
-        input.reportValidity();
-        input.focus();
-      }
-    }
-  );
+  });
 });
-
-const pageScrollContainer =
-  document.querySelector(
-    "body > .page:not(.chat)"
-  );
-
-function keepFocusedFieldVisible(event) {
-  const target = event.target;
-
-  if (
-    !pageScrollContainer
-    || !target
-    || !target.matches(
-      "input, textarea, select, button"
-    )
-  ) {
-    return;
-  }
-
-  window.setTimeout(() => {
-    target.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-      inline: "nearest",
-    });
-  }, 250);
-}
-
-document.addEventListener(
-  "focusin",
-  keepFocusedFieldVisible
-);
-
-if (window.visualViewport) {
-  const syncPageViewportHeight = () => {
-    if (!pageScrollContainer) {
-      return;
-    }
-
-    pageScrollContainer.style.height =
-      `${window.visualViewport.height}px`;
-  };
-
-  window.visualViewport.addEventListener(
-    "resize",
-    syncPageViewportHeight
-  );
-
-  window.visualViewport.addEventListener(
-    "scroll",
-    syncPageViewportHeight
-  );
-
-  syncPageViewportHeight();
-}
-
-const lastRoomCode =
-  localStorage.getItem(
-    "contact_guard_last_room_code"
-  );
-
-const lastRoomToken =
-  lastRoomCode
-    ? localStorage.getItem(
-        `contact_guard_token_${lastRoomCode}`
-      )
-    : "";
-
-const reconnectCard =
-  document.getElementById(
-    "reconnect-card"
-  );
-
-const reconnectButton =
-  document.getElementById(
-    "reconnect-button"
-  );
-
-let reconnectExpiryTimer = null;
-
-function clearReconnectStorage() {
-  if (reconnectExpiryTimer) {
-    clearTimeout(reconnectExpiryTimer);
-    reconnectExpiryTimer = null;
-  }
-
-  reconnectCard.classList.add(
-    "hidden"
-  );
-
-  localStorage.removeItem(
-    "contact_guard_last_room_code"
-  );
-
-  if (lastRoomCode) {
-    localStorage.removeItem(
-      `contact_guard_token_${lastRoomCode}`
-    );
-
-    sessionStorage.removeItem(
-      `contact_guard_connection_${lastRoomCode}`
-    );
-  }
-}
-
-function scheduleReconnectExpiry(
-  expiresAt
-) {
-  if (!expiresAt) {
-    return;
-  }
-
-  const expiresAtMs =
-    new Date(expiresAt).getTime();
-
-  if (!Number.isFinite(expiresAtMs)) {
-    clearReconnectStorage();
-    return;
-  }
-
-  const remainingMs =
-    expiresAtMs - Date.now();
-
-  if (remainingMs <= 0) {
-    clearReconnectStorage();
-    return;
-  }
-
-  reconnectExpiryTimer = setTimeout(
-    async () => {
-      await initializeReconnectCard();
-    },
-    Math.min(
-      remainingMs + 250,
-      2147483647
-    )
-  );
-}
-
-async function initializeReconnectCard() {
-  if (
-    !lastRoomCode
-    || !lastRoomToken
-  ) {
-    clearReconnectStorage();
-    return;
-  }
-
-  if (reconnectExpiryTimer) {
-    clearTimeout(reconnectExpiryTimer);
-    reconnectExpiryTimer = null;
-  }
-
-  try {
-    const response = await fetch(
-      `/api/room/${lastRoomCode}/reconnect-status`,
-      {
-        cache: "no-store",
-        headers: {
-          "X-User-Token": lastRoomToken
-        }
-      }
-    );
-
-    const data = await response.json();
-
-    if (
-      !response.ok
-      || !data.can_reconnect
-    ) {
-      clearReconnectStorage();
-      return;
-    }
-
-    reconnectCard.classList.remove(
-      "hidden"
-    );
-
-    reconnectButton.textContent =
-      `${lastRoomCode} 방 다시 들어가기`;
-
-    reconnectButton.onclick = () => {
-      window.location.href =
-        `/room/${lastRoomCode}`
-        + `?token=${encodeURIComponent(
-          lastRoomToken
-        )}`;
-    };
-
-    scheduleReconnectExpiry(
-      data.expires_at || ""
-    );
-
-  } catch (error) {
-    console.error(error);
-
-    reconnectCard.classList.add(
-      "hidden"
-    );
-  }
-}
-
-initializeReconnectCard();
 </script>
 </body>
 </html>
