@@ -1845,12 +1845,26 @@ a { color: white; }
   }
 
   body > .page:not(.chat) {
-    height: auto;
-    min-height: 100vh;
-    min-height: 100dvh;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
     padding-top: max(12px, env(safe-area-inset-top));
-    padding-bottom: max(20px, env(safe-area-inset-bottom));
+    padding-bottom: max(36px, calc(env(safe-area-inset-bottom) + 20px));
+    scroll-padding-top: max(12px, env(safe-area-inset-top));
+    scroll-padding-bottom: max(120px, calc(env(safe-area-inset-bottom) + 96px));
+  }
+
+  body > .page:not(.chat) .grid,
+  body > .page:not(.chat) form.card {
+    min-height: 0;
+  }
+
+  body > .page:not(.chat) form.card:last-child {
+    margin-bottom: max(28px, env(safe-area-inset-bottom));
   }
 
   .chat {
@@ -2204,6 +2218,61 @@ HOME_HTML = """
   </main>
 
 <script>
+const pageScrollContainer =
+  document.querySelector(
+    "body > .page:not(.chat)"
+  );
+
+function keepFocusedFieldVisible(event) {
+  const target = event.target;
+
+  if (
+    !pageScrollContainer
+    || !target
+    || !target.matches(
+      "input, textarea, select, button"
+    )
+  ) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    target.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+  }, 250);
+}
+
+document.addEventListener(
+  "focusin",
+  keepFocusedFieldVisible
+);
+
+if (window.visualViewport) {
+  const syncPageViewportHeight = () => {
+    if (!pageScrollContainer) {
+      return;
+    }
+
+    pageScrollContainer.style.height =
+      `${window.visualViewport.height}px`;
+  };
+
+  window.visualViewport.addEventListener(
+    "resize",
+    syncPageViewportHeight
+  );
+
+  window.visualViewport.addEventListener(
+    "scroll",
+    syncPageViewportHeight
+  );
+
+  syncPageViewportHeight();
+}
+
 const lastRoomCode =
   localStorage.getItem(
     "contact_guard_last_room_code"
@@ -2584,6 +2653,8 @@ let lastMessageId = 0;
 let isLoadingMessages = false;
 let roomExpiresAt = "";
 let roomExpired = false;
+let roomMatched = false;
+let messageReloadRequested = false;
 const renderedMessageIds = new Set();
 
 const messagesElement =
@@ -2913,6 +2984,11 @@ function applyChoiceState(
   const matched =
     Boolean(state.matched);
 
+  const matchedJustNow =
+    matched && !roomMatched;
+
+  roomMatched = matched;
+
   choiceLikeButton.classList.remove(
     "selected-like"
   );
@@ -2955,6 +3031,10 @@ function applyChoiceState(
         "hidden"
       );
     }
+  }
+
+  if (matchedJustNow) {
+    reloadMessagesWithMatchedNames();
   }
 }
 
@@ -3202,6 +3282,19 @@ async function registerConnection() {
   return true;
 }
 
+async function reloadMessagesWithMatchedNames() {
+  if (isLoadingMessages) {
+    messageReloadRequested = true;
+    return;
+  }
+
+  lastMessageId = 0;
+  renderedMessageIds.clear();
+  messageListElement.replaceChildren();
+
+  await loadMessages();
+}
+
 async function loadMessages() {
   if (isLoadingMessages) {
     return;
@@ -3253,6 +3346,11 @@ async function loadMessages() {
 
   } finally {
     isLoadingMessages = false;
+
+    if (messageReloadRequested) {
+      messageReloadRequested = false;
+      reloadMessagesWithMatchedNames();
+    }
   }
 }
 
@@ -3399,6 +3497,8 @@ async function sendImage(file) {
   );
 }
 
+let imageAutoSending = false;
+
 imageInputElement.addEventListener(
   "change",
   () => {
@@ -3410,9 +3510,35 @@ imageInputElement.addEventListener(
         ? `선택한 사진: ${file.name}`
         : "";
 
-    if (file) {
-      keepComposerVisible(true);
+    if (!file) {
+      return;
     }
+
+    keepComposerVisible(true);
+
+    if (imageAutoSending || roomExpired) {
+      return;
+    }
+
+    imageAutoSending = true;
+
+    // 모바일 갤러리의 '완료' 화면이 닫힌 뒤
+    // 기존 전송 폼을 그대로 실행한다.
+    window.setTimeout(
+      () => {
+        if (
+          imageInputElement.files[0]
+          && !roomExpired
+        ) {
+          formElement.requestSubmit(
+            sendButtonElement
+          );
+        } else {
+          imageAutoSending = false;
+        }
+      },
+      80
+    );
   }
 );
 
@@ -3488,6 +3614,7 @@ formElement.addEventListener(
       );
 
     } finally {
+      imageAutoSending = false;
       button.disabled = false;
       button.textContent = "전송";
 
@@ -5090,16 +5217,28 @@ def get_messages(room_code: str):
         rows = connection.execute(
             """
             SELECT
-                id,
-                user_token,
-                nickname,
-                message_type,
-                content,
-                created_at
-            FROM messages
-            WHERE room_code = ?
-              AND id > ?
-            ORDER BY id ASC
+                msg.id,
+                msg.user_token,
+                CASE
+                    WHEN (
+                        SELECT COUNT(DISTINCT rc.user_token)
+                        FROM room_choices rc
+                        WHERE rc.room_code = msg.room_code
+                          AND rc.choice = 'like'
+                    ) = 2
+                    THEN COALESCE(NULLIF(m.kakao_nickname, ''), msg.nickname)
+                    ELSE msg.nickname
+                END AS display_nickname,
+                msg.message_type,
+                msg.content,
+                msg.created_at
+            FROM messages msg
+            LEFT JOIN members m
+              ON m.room_code = msg.room_code
+             AND m.user_token = msg.user_token
+            WHERE msg.room_code = ?
+              AND msg.id > ?
+            ORDER BY msg.id ASC
             LIMIT 200
             """,
             (
@@ -5124,7 +5263,7 @@ def get_messages(room_code: str):
         messages.append(
             {
                 "id": row["id"],
-                "nickname": row["nickname"],
+                "nickname": row["display_nickname"],
                 "message_type": row[
                     "message_type"
                 ],
