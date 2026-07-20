@@ -1642,12 +1642,18 @@ button {
 .messages {
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   overflow-anchor: none;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 18px;
   background: #15171b;
+}
+#message-list {
+  width: 100%;
+  margin-top: auto;
 }
 .message {
   width: min(76%, 620px);
@@ -1794,76 +1800,304 @@ a { color: white; }
   font-family: monospace;
   font-size: 1.1em;
 }
+/* 태블릿 및 작은 노트북 */
+@media (max-width: 900px) {
+  .page {
+    width: min(100% - 24px, 820px);
+    padding: 20px 0;
+  }
+
+  .narrow {
+    width: min(100% - 24px, 760px);
+  }
+
+  .chat {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .message {
+    width: min(82%, 580px);
+  }
+}
+
+/* 스마트폰 */
 @media (max-width: 700px) {
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
   .grid {
     grid-template-columns: 1fr;
   }
+
   .page {
-    width: calc(100% - 16px);
-    padding: 12px 0 24px;
+    width: 100%;
+    margin: 0;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
   }
-  .chat {
+
+  body > .page:not(.chat) {
     height: auto;
+    min-height: 100vh;
     min-height: 100dvh;
+    overflow-y: auto;
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
+  }
+
+  .chat {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: clamp(5px, 1.3vh, 8px);
+    overflow: hidden;
     overflow-anchor: none;
+    padding-top: max(8px, env(safe-area-inset-top));
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
   }
-  .messages {
+
+  .chat .header {
     flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 6px;
+  }
+
+  .chat .header > div {
+    min-width: 0;
+  }
+
+  .chat .header h1 {
+    margin: 0 0 3px;
+    font-size: clamp(18px, 5vw, 23px);
+    line-height: 1.2;
+  }
+
+  .chat .header p {
+    margin: 0;
+    font-size: clamp(11px, 3vw, 13px);
+    line-height: 1.35;
+  }
+
+  #leave-room {
+    padding: 5px 0 5px 8px;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  #admin-admission-panel {
+    flex: 0 0 auto;
+    padding: 9px !important;
+  }
+
+  #choice-bar {
+    flex: 0 0 auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .choice-button {
+    min-width: 0;
+    min-height: clamp(34px, 5.5vh, 40px);
+    padding: 6px 5px;
+    border-radius: 6px;
+    font-size: clamp(12px, 3.2vw, 14px);
+  }
+
+  #matched-kakao-box {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+
+  .messages {
+    flex: 1 1 0;
     width: 100%;
-    height: 60dvh;
-    min-height: 390px;
-    max-height: 620px;
+    height: 0;
+    min-height: 0;
+    max-height: none;
+    padding: clamp(9px, 2.5vw, 14px);
+    border-radius: 13px;
     overflow-y: auto;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
   }
+
+  #notice {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+
+  .file-name {
+    flex: 0 0 auto;
+    min-height: 0;
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
   .composer {
     flex: 0 0 auto;
     width: 100%;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 7px;
+    gap: 6px;
     align-items: stretch;
-    scroll-margin-bottom: 18px;
+    padding: 0;
+    scroll-margin-bottom: 6px;
   }
+
   .composer textarea {
     min-width: 0;
-    padding: 11px;
+    min-height: 44px;
+    max-height: 88px;
+    padding: 9px 10px;
+    border-radius: 10px;
+    resize: none;
+    font-size: 16px;
+    line-height: 1.3;
   }
+
   .composer button {
     grid-column: auto;
-    min-width: 58px;
-    padding: 10px 12px;
+    min-width: clamp(54px, 15vw, 68px);
+    padding: 8px 10px;
+    border-radius: 10px;
+    font-size: 13px;
   }
+
   .file-button {
-    padding: 0 11px;
+    min-width: clamp(48px, 13vw, 60px);
+    padding: 0 8px;
+    border-radius: 10px;
+    font-size: 13px;
   }
-  .file-name {
-    min-height: 0;
-  }
+
   .message {
-    width: 90%;
+    width: min(88%, 520px);
+    margin-bottom: 9px;
   }
-  .header {
-    flex-direction: column;
-    gap: 6px;
+
+  .meta {
+    margin-bottom: 3px;
+    font-size: 11px;
   }
-  #choice-bar {
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
+
+  .bubble {
+    padding: 9px 11px;
+    border-radius: 13px;
+    font-size: clamp(14px, 3.8vw, 16px);
+    line-height: 1.4;
   }
+
+  .chat-image {
+    max-height: min(46dvh, 420px);
+  }
+}
+
+/* 폭이 매우 좁은 스마트폰 */
+@media (max-width: 380px) {
+  .chat {
+    gap: 4px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .chat .header h1 {
+    font-size: 17px;
+  }
+
+  .chat .header p,
+  #leave-room {
+    font-size: 11px;
+  }
+
   .choice-button {
-    min-width: 0;
-    min-height: 38px;
-    padding: 8px 6px;
-    border-radius: 4px;
-    font-size: 13px;
+    min-height: 32px;
+    padding: 5px 3px;
+    font-size: 11px;
   }
-  #matched-kakao-box {
-    padding: 9px;
-    font-size: 13px;
+
+  .messages {
+    padding: 8px;
+  }
+
+  .composer {
+    gap: 4px;
+  }
+
+  .composer textarea {
+    min-height: 42px;
+    padding: 8px;
+  }
+
+  .composer button {
+    min-width: 50px;
+    padding: 7px;
+  }
+
+  .file-button {
+    min-width: 44px;
+    padding: 0 6px;
+  }
+
+  .message {
+    width: 92%;
+  }
+}
+
+/* 가로 화면이 낮은 스마트폰 */
+@media (max-height: 520px) and (orientation: landscape) {
+  .chat {
+    gap: 4px;
+    padding-top: max(4px, env(safe-area-inset-top));
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
+  }
+
+  .chat .header h1 {
+    font-size: 16px;
+  }
+
+  .chat .header p {
+    font-size: 10px;
+  }
+
+  #choice-bar {
+    gap: 4px;
+  }
+
+  .choice-button {
+    min-height: 29px;
+    padding: 3px 5px;
+    font-size: 11px;
+  }
+
+  .messages {
+    padding: 7px;
+  }
+
+  .composer textarea {
+    min-height: 38px;
+    max-height: 58px;
+    padding: 7px 9px;
+  }
+
+  .composer button,
+  .file-button {
+    min-height: 38px;
   }
 }
 </style>
@@ -1876,7 +2110,7 @@ HOME_HTML = """
   <meta charset="utf-8">
   <meta
     name="viewport"
-    content="width=device-width,initial-scale=1"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
   <title>연락처 차단 채팅</title>
   """ + STYLE + """
@@ -1992,12 +2226,79 @@ const reconnectButton =
     "reconnect-button"
   );
 
+let reconnectExpiryTimer = null;
+
+function clearReconnectStorage() {
+  if (reconnectExpiryTimer) {
+    clearTimeout(reconnectExpiryTimer);
+    reconnectExpiryTimer = null;
+  }
+
+  reconnectCard.classList.add(
+    "hidden"
+  );
+
+  localStorage.removeItem(
+    "contact_guard_last_room_code"
+  );
+
+  if (lastRoomCode) {
+    localStorage.removeItem(
+      `contact_guard_token_${lastRoomCode}`
+    );
+
+    sessionStorage.removeItem(
+      `contact_guard_connection_${lastRoomCode}`
+    );
+  }
+}
+
+function scheduleReconnectExpiry(
+  expiresAt
+) {
+  if (!expiresAt) {
+    return;
+  }
+
+  const expiresAtMs =
+    new Date(expiresAt).getTime();
+
+  if (!Number.isFinite(expiresAtMs)) {
+    clearReconnectStorage();
+    return;
+  }
+
+  const remainingMs =
+    expiresAtMs - Date.now();
+
+  if (remainingMs <= 0) {
+    clearReconnectStorage();
+    return;
+  }
+
+  reconnectExpiryTimer = setTimeout(
+    async () => {
+      await initializeReconnectCard();
+    },
+    Math.min(
+      remainingMs + 250,
+      2147483647
+    )
+  );
+}
+
 async function initializeReconnectCard() {
   if (
     !lastRoomCode
     || !lastRoomToken
   ) {
+    clearReconnectStorage();
     return;
+  }
+
+  if (reconnectExpiryTimer) {
+    clearTimeout(reconnectExpiryTimer);
+    reconnectExpiryTimer = null;
   }
 
   try {
@@ -2017,18 +2318,7 @@ async function initializeReconnectCard() {
       !response.ok
       || !data.can_reconnect
     ) {
-      localStorage.removeItem(
-        "contact_guard_last_room_code"
-      );
-
-      localStorage.removeItem(
-        `contact_guard_token_${lastRoomCode}`
-      );
-
-      reconnectCard.classList.add(
-        "hidden"
-      );
-
+      clearReconnectStorage();
       return;
     }
 
@@ -2039,15 +2329,16 @@ async function initializeReconnectCard() {
     reconnectButton.textContent =
       `${lastRoomCode} 방 다시 들어가기`;
 
-    reconnectButton.addEventListener(
-      "click",
-      () => {
-        window.location.href =
-          `/room/${lastRoomCode}`
-          + `?token=${encodeURIComponent(
-            lastRoomToken
-          )}`;
-      }
+    reconnectButton.onclick = () => {
+      window.location.href =
+        `/room/${lastRoomCode}`
+        + `?token=${encodeURIComponent(
+          lastRoomToken
+        )}`;
+    };
+
+    scheduleReconnectExpiry(
+      data.expires_at || ""
     );
 
   } catch (error) {
@@ -2073,7 +2364,7 @@ CHAT_HTML = """
 
   <meta
     name="viewport"
-    content="width=device-width,initial-scale=1"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
 
   <title>채팅방</title>
@@ -2178,7 +2469,9 @@ CHAT_HTML = """
     <section
       id="messages"
       class="messages"
-    ></section>
+    >
+      <div id="message-list"></div>
+    </section>
 
     <div
       id="notice"
@@ -2295,6 +2588,9 @@ const renderedMessageIds = new Set();
 
 const messagesElement =
   document.getElementById("messages");
+
+const messageListElement =
+  document.getElementById("message-list");
 
 const inputElement =
   document.getElementById("input");
@@ -2850,6 +3146,15 @@ function addMessage(message) {
       }
     );
 
+    image.addEventListener(
+      "load",
+      () => {
+        messagesElement.scrollTop =
+          messagesElement.scrollHeight;
+      },
+      { once: true }
+    );
+
     bubble.appendChild(image);
   } else {
     bubble.textContent = message.content;
@@ -2860,7 +3165,7 @@ function addMessage(message) {
     bubble
   );
 
-  messagesElement.appendChild(
+  messageListElement.appendChild(
     article
   );
 
@@ -3324,7 +3629,7 @@ ADMIN_LOGIN_HTML = """
 
   <meta
     name="viewport"
-    content="width=device-width,initial-scale=1"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
 
   <title>관리자</title>
@@ -3381,7 +3686,7 @@ ADMIN_HTML = """
 
   <meta
     name="viewport"
-    content="width=device-width,initial-scale=1"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
 
   <title>관리자</title>
@@ -4306,6 +4611,24 @@ def reconnect_status(room_code: str):
         room_code.upper().strip()
     )
 
+    # 인증 확인보다 먼저 방 만료를 판정해.
+    # 만료된 일반 방이면 여기서 DB와 이미지까지 정리돼.
+    is_expired, expires_at = (
+        get_room_time_state(
+            normalized_room_code
+        )
+    )
+
+    if is_expired:
+        return jsonify(
+            {
+                "ok": True,
+                "can_reconnect": False,
+                "expired": True,
+                "expires_at": expires_at,
+            }
+        )
+
     user_token = get_request_user_token()
 
     member = get_room_member(
@@ -4325,21 +4648,7 @@ def reconnect_status(room_code: str):
             {
                 "ok": True,
                 "can_reconnect": False,
-            }
-        )
-
-    is_expired, expires_at = (
-        get_room_time_state(
-            normalized_room_code
-        )
-    )
-
-    if is_expired:
-        return jsonify(
-            {
-                "ok": True,
-                "can_reconnect": False,
-                "expired": True,
+                "expired": False,
                 "expires_at": expires_at,
             }
         )
