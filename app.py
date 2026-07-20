@@ -260,6 +260,12 @@ def init_db() -> None:
                 week_start
             );
 
+            CREATE TABLE IF NOT EXISTS allowed_kakao_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kakao_nickname TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 setting_key TEXT PRIMARY KEY,
                 setting_value TEXT NOT NULL,
@@ -3810,6 +3816,75 @@ ADMIN_HTML = """
     </section>
 
     <section class="card">
+      <h2>카카오 채팅 이용자 관리</h2>
+
+      <p class="muted">
+        등록된 카카오톡 닉네임만 일반 방을 만들거나 참여할 수 있어.
+      </p>
+
+      {% if admin_message %}
+        <div class="alert">{{ admin_message }}</div>
+      {% endif %}
+
+      <form
+        method="post"
+        action="{{ url_for('admin_add_kakao_user') }}"
+      >
+        <label>카카오톡 닉네임</label>
+        <input
+          name="kakao_nickname"
+          maxlength="2"
+          placeholder="한글 2글자"
+          required
+        >
+        <button class="primary full" type="submit">
+          이용자 등록
+        </button>
+      </form>
+
+      <div class="table-wrap" style="margin-top:16px;">
+        <table>
+          <tr>
+            <th>카카오 닉네임</th>
+            <th>이번 주 이용</th>
+            <th>등록일</th>
+            <th>관리</th>
+          </tr>
+          {% for user in allowed_kakao_users %}
+            <tr>
+              <td>{{ user.kakao_nickname }}</td>
+              <td>{{ user.weekly_count }} / {{ weekly_limit }}</td>
+              <td>{{ user.created_at }}</td>
+              <td>
+                <form
+                  method="post"
+                  action="{{ url_for('admin_reset_kakao_user_count', user_id=user.id) }}"
+                  style="display:inline;"
+                  onsubmit="return confirm('이 이용자의 이번 주 이용 횟수를 0회로 초기화할까?');"
+                >
+                  <button type="submit">횟수 초기화</button>
+                </form>
+
+                <form
+                  method="post"
+                  action="{{ url_for('admin_delete_kakao_user', user_id=user.id) }}"
+                  style="display:inline; margin-left:6px;"
+                  onsubmit="return confirm('이 이용자를 등록 명단에서 삭제할까?');"
+                >
+                  <button type="submit">삭제</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4">등록된 이용자가 없어.</td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>시간 제한 없는 관리자 방</h2>
 
       <p class="muted">
@@ -4296,6 +4371,26 @@ def get_kst_week_start_iso() -> str:
     return get_kst_week_start().isoformat()
 
 
+def is_allowed_kakao_user(
+    connection: sqlite3.Connection,
+    kakao_nickname: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM allowed_kakao_users
+        WHERE kakao_nickname = ?
+        """,
+        (normalize_kakao_nickname(kakao_nickname),),
+    ).fetchone()
+
+    return row is not None
+
+
+def unregistered_kakao_error_message() -> str:
+    return "등록되지 않은 카카오톡 닉네임이야. 관리자에게 등록을 요청해줘."
+
+
 def get_weekly_kakao_entry_count(
     connection: sqlite3.Connection,
     kakao_nickname: str,
@@ -4423,6 +4518,24 @@ def create_room():
         with db_connect() as connection:
             # 같은 닉네임의 동시 요청도 2회를 넘지 않도록 쓰기 잠금
             connection.execute("BEGIN IMMEDIATE")
+
+            if not is_allowed_kakao_user(
+                connection,
+                kakao_nickname,
+            ):
+                connection.rollback()
+
+                write_status_log(
+                    "KAKAO_USER_ALLOWLIST",
+                    "BLOCKED",
+                    "등록되지 않은 카카오톡 닉네임의 방 생성을 막았어.",
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error=unregistered_kakao_error_message(),
+                ), 403
 
             entry_count = (
                 get_weekly_kakao_entry_count(
@@ -4638,6 +4751,24 @@ def join_room():
                     HOME_HTML,
                     error="이미 두 명이 입장한 방이야.",
                 ), 409
+
+            if not is_allowed_kakao_user(
+                connection,
+                kakao_nickname,
+            ):
+                connection.rollback()
+
+                write_status_log(
+                    "KAKAO_USER_ALLOWLIST",
+                    "BLOCKED",
+                    "등록되지 않은 카카오톡 닉네임의 방 참여를 막았어.",
+                    room_code,
+                )
+
+                return render_template_string(
+                    HOME_HTML,
+                    error=unregistered_kakao_error_message(),
+                ), 403
 
             entry_count = (
                 get_weekly_kakao_entry_count(
@@ -6025,6 +6156,142 @@ def admin_set_admission_mode():
 
 
 @app.route(
+    "/admin/kakao-users/add",
+    methods=["POST"],
+)
+@admin_required
+def admin_add_kakao_user():
+    kakao_nickname = normalize_kakao_nickname(
+        request.form.get("kakao_nickname", "")
+    )
+
+    if not is_valid_kakao_nickname(kakao_nickname):
+        return redirect(
+            url_for(
+                "admin_dashboard",
+                message="카카오톡 닉네임은 한글 2글자로 입력해줘.",
+            )
+        )
+
+    try:
+        with db_connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO allowed_kakao_users(
+                    kakao_nickname,
+                    created_at
+                )
+                VALUES (?, ?)
+                """,
+                (kakao_nickname, now_kst_iso()),
+            )
+    except sqlite3.IntegrityError:
+        return redirect(
+            url_for(
+                "admin_dashboard",
+                message="이미 등록된 카카오톡 닉네임이야.",
+            )
+        )
+
+    write_status_log(
+        "KAKAO_USER_ALLOWLIST",
+        "ADDED",
+        f"카카오톡 이용자 {kakao_nickname}을 등록했어.",
+    )
+
+    return redirect(
+        url_for(
+            "admin_dashboard",
+            message=f"{kakao_nickname} 이용자를 등록했어.",
+        )
+    )
+
+
+@app.route(
+    "/admin/kakao-users/<int:user_id>/reset",
+    methods=["POST"],
+)
+@admin_required
+def admin_reset_kakao_user_count(user_id: int):
+    week_start = get_kst_week_start_iso()
+
+    with db_connect() as connection:
+        user = connection.execute(
+            "SELECT kakao_nickname FROM allowed_kakao_users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if user is None:
+            return redirect(
+                url_for(
+                    "admin_dashboard",
+                    message="해당 이용자를 찾을 수 없어.",
+                )
+            )
+
+        connection.execute(
+            """
+            DELETE FROM weekly_kakao_entries
+            WHERE kakao_nickname = ?
+              AND week_start = ?
+            """,
+            (user["kakao_nickname"], week_start),
+        )
+
+    write_status_log(
+        "KAKAO_USER_WEEKLY_COUNT",
+        "RESET",
+        f"{user['kakao_nickname']} 이용자의 이번 주 이용 횟수를 초기화했어.",
+    )
+
+    return redirect(
+        url_for(
+            "admin_dashboard",
+            message=f"{user['kakao_nickname']} 이용 횟수를 0회로 초기화했어.",
+        )
+    )
+
+
+@app.route(
+    "/admin/kakao-users/<int:user_id>/delete",
+    methods=["POST"],
+)
+@admin_required
+def admin_delete_kakao_user(user_id: int):
+    with db_connect() as connection:
+        user = connection.execute(
+            "SELECT kakao_nickname FROM allowed_kakao_users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if user is None:
+            return redirect(
+                url_for(
+                    "admin_dashboard",
+                    message="해당 이용자를 찾을 수 없어.",
+                )
+            )
+
+        connection.execute(
+            "DELETE FROM allowed_kakao_users WHERE id = ?",
+            (user_id,),
+        )
+
+    write_status_log(
+        "KAKAO_USER_ALLOWLIST",
+        "DELETED",
+        f"카카오톡 이용자 {user['kakao_nickname']}을 등록 명단에서 삭제했어.",
+    )
+
+    return redirect(
+        url_for(
+            "admin_dashboard",
+            message=f"{user['kakao_nickname']} 이용자를 삭제했어.",
+        )
+    )
+
+
+@app.route(
     "/admin/create-room",
     methods=["POST"],
 )
@@ -6231,6 +6498,28 @@ def admin_dashboard():
             """
         ).fetchall()
 
+        week_start = get_kst_week_start_iso()
+
+        allowed_kakao_users = connection.execute(
+            """
+            SELECT
+                u.id,
+                u.kakao_nickname,
+                u.created_at,
+                COUNT(w.id) AS weekly_count
+            FROM allowed_kakao_users u
+            LEFT JOIN weekly_kakao_entries w
+                ON w.kakao_nickname = u.kakao_nickname
+               AND w.week_start = ?
+            GROUP BY
+                u.id,
+                u.kakao_nickname,
+                u.created_at
+            ORDER BY u.created_at DESC
+            """,
+            (week_start,),
+        ).fetchall()
+
         rooms = connection.execute(
             """
             SELECT
@@ -6263,6 +6552,9 @@ def admin_dashboard():
         status_logs=status_logs,
         blocked=blocked,
         rooms=rooms,
+        allowed_kakao_users=allowed_kakao_users,
+        weekly_limit=WEEKLY_KAKAO_ENTRY_LIMIT,
+        admin_message=request.args.get("message", "").strip(),
         db_path=DB_PATH,
         public_entry_enabled=(
             get_public_entry_enabled()
