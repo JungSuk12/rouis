@@ -4312,12 +4312,12 @@ async function refreshHealth() {
   }
 }
 
-refreshHealth();
+//refreshHealth();
 
-setInterval(
-  refreshHealth,
-  5000
-);
+//setInterval(
+//  refreshHealth,
+//  5000
+//);
 </script>
 </body>
 </html>
